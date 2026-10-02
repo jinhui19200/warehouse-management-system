@@ -1,6 +1,6 @@
 {
   "name": "warehouse-manager",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "库存管理系统 —— 仓库、记录、出入库操作",
   "main": "./out/main/index.js",
   "author": "lin",
