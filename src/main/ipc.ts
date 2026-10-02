@@ -53,8 +53,14 @@ export function registerIpcHandlers(): void {
   })
 
   /** 撤销记录（会反向冲销库存） */
-  ipcMain.handle('db:deleteRecord', async (_event, id: string) => {
-    const result = await deleteRecord(id)
+  /**
+   * 撤销一条记录（需口令）。
+   *
+   * 口令的校验点在数据层，不在这个 handler 里 —— 界面上的口令框只是交互，
+   * 绕过它直接 invoke 本通道必须同样被拒。
+   */
+  ipcMain.handle('db:deleteRecord', async (_event, id: string, password: string) => {
+    const result = await deleteRecord(id, password)
     if (result.ok) broadcastChanged()
     return result
   })

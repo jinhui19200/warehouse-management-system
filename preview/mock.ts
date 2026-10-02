@@ -233,7 +233,12 @@ function applyTransaction(input: TransactionInput): TransactionResult {
   }
 }
 
-function deleteRecord(id: string): DeleteRecordResult {
+/** 撤销记录（需口令）。语义与主进程 `deleteRecord` 一致：口令不对直接拒、不动数据 */
+function deleteRecord(id: string, password: unknown): DeleteRecordResult {
+  if (!matchesQuantityPassword(password)) {
+    return { ok: false, error: '口令不正确', wrongPassword: true }
+  }
+
   const index = db.records.findIndex((r) => r.id === id)
   if (index < 0) return { ok: false, error: '记录不存在，可能已被删除' }
 
@@ -585,7 +590,8 @@ const api = {
   getSnapshot: async (): Promise<DB> => clone(),
   applyTransaction: async (input: TransactionInput): Promise<TransactionResult> =>
     applyTransaction(input),
-  deleteRecord: async (id: string): Promise<DeleteRecordResult> => deleteRecord(id),
+  deleteRecord: async (id: string, password: string): Promise<DeleteRecordResult> =>
+    deleteRecord(id, password),
   setItemThreshold: async (id: string, threshold: number): Promise<SetThresholdResult> =>
     setItemThreshold(id, threshold),
   setItemQuantity: async (

@@ -249,12 +249,21 @@ async function run(): Promise<void> {
   )
   check('头部「打开数据文件夹」按钮已渲染', headerBtns.includes('打开数据文件夹'), headerBtns)
 
-  const bridgeOk = await waitFor(async () =>
-    (await evalIn<string>(win!, 'document.querySelector(".bridge-status")?.textContent ?? ""')).includes(
-      '主进程通道正常'
-    )
+  /*
+   * 原来这条读的是标题旁那行「主进程通道正常（返回 pong）」。
+   * 2026-10-02 把那行小字隐藏了（用户不需要看），所以改成**直接探桥接本身** ——
+   * 比「看界面上有没有字」更接近真正要验的东西。
+   */
+  // ping() 返回 Promise，得 await 之后才能拿到 'pong' 这个字符串
+  const pingOk = await waitFor(async () =>
+    (await evalIn<string>(win!, '(async () => String(await window.api.ping()))()')).includes('pong')
   )
-  check('界面状态显示「主进程通道正常」', bridgeOk)
+  check('渲染进程能调到主进程（ping 返回 pong）', pingOk)
+  const bridgeText = await evalIn<string>(
+    win,
+    'document.querySelector(".bridge-status")?.textContent ?? ""'
+  )
+  check('正常状态下标题旁不显示状态小字', bridgeText === '', JSON.stringify(bridgeText))
 
   // ── 3. 从界面提交 → 落盘 ─────────────────────────────────────
   // 本脚本的账目（后续断言都按这张表推）：
@@ -348,7 +357,22 @@ async function run(): Promise<void> {
   const snapBefore = await evalIn<DB>(win, 'window.api.getSnapshot()')
   const outRec = snapBefore.records.find((r) => r.type === 'out')
   check('找到那笔出库记录', Boolean(outRec))
-  const del = await evalIn<DeleteRecordResult>(win, `window.api.deleteRecord(${JSON.stringify(outRec?.id ?? '')})`)
+  // 撤销自 2026-10-02 起要口令 —— 先验「绕过界面、口令不对」这条路被拒
+  const undoBad = await evalIn<DeleteRecordResult>(
+    win,
+    `window.api.deleteRecord(${JSON.stringify(outRec?.id ?? '')}, "000000")`
+  )
+  check(
+    '撤销：口令错 → 绕过界面同样被拒',
+    undoBad.ok === false && undoBad.wrongPassword === true,
+    JSON.stringify(undoBad)
+  )
+  check('口令错 → 磁盘上记录还在', (await readJSON(dataFile)).records.length === 5)
+
+  const del = await evalIn<DeleteRecordResult>(
+    win,
+    `window.api.deleteRecord(${JSON.stringify(outRec?.id ?? '')}, ${JSON.stringify(QUANTITY_EDIT_PASSWORD)})`
+  )
   check('撤销返回 ok', del.ok === true, del.ok ? '' : del.error)
   check('库存回到 165（-35 + 200）', del.ok && del.item?.quantity === 165, del.ok ? `${del.item?.quantity}` : '')
   const onDiskAfterUndo = await readJSON(dataFile)

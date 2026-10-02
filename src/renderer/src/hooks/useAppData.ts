@@ -27,7 +27,8 @@ export interface AppData {
   dataPath: string
   refresh: () => Promise<void>
   applyTransaction: (input: TransactionInput) => Promise<TransactionResult>
-  deleteRecord: (id: string) => Promise<DeleteRecordResult>
+  /** 撤销记录（会反向冲销库存，需口令；校验在数据层） */
+  deleteRecord: (id: string, password: string) => Promise<DeleteRecordResult>
   setItemThreshold: (id: string, threshold: number) => Promise<SetThresholdResult>
   /** 强行修改库存数量（需口令，校验在数据层） */
   setItemQuantity: (id: string, quantity: number, password: string) => Promise<SetQuantityResult>
@@ -84,8 +85,8 @@ export function useAppData(): AppData {
   )
 
   const deleteRecord = useCallback(
-    async (id: string): Promise<DeleteRecordResult> => {
-      const result = await window.api.deleteRecord(id)
+    async (id: string, password: string): Promise<DeleteRecordResult> => {
+      const result = await window.api.deleteRecord(id, password)
       if (result.ok) await refresh()
       return result
     },

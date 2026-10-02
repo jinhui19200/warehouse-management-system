@@ -543,6 +543,8 @@ body {
   font-size: 13px;
   line-height: 1.7;
   color: var(--text);
+  /* 撤销确认那段是多行的（记录详情一行、说明一行），要真的换行显示 */
+  white-space: pre-line;
 }
 
 .modal-note {

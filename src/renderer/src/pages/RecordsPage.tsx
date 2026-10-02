@@ -1,13 +1,14 @@
 import { useMemo, useState } from 'react'
 import * as XLSX from 'xlsx'
-import type { Item, RenameItemResult, StockRecord } from '@shared/types'
+import type { DeleteRecordResult, Item, RenameItemResult, StockRecord } from '@shared/types'
 import { displayDateTime, formatQuantity, HANDLER_COLUMN, handlerLabel } from '@shared/utils'
 import { NameCell, useRenameFlow } from '../components/RenameName'
+import { usePasswordFlow } from '../components/PasswordDialog'
 
 interface Props {
   items: Item[]
   records: StockRecord[]
-  deleteRecord: (id: string) => Promise<unknown>
+  deleteRecord: (id: string, password: string) => Promise<DeleteRecordResult>
   renameItem: (id: string, name: string, unit?: string) => Promise<RenameItemResult>
   exportXlsx: (data: number[], defaultName: string) => Promise<{
     ok: boolean
@@ -32,6 +33,7 @@ export function RecordsPage({
   const [exporting, setExporting] = useState(false)
 
   const rename = useRenameFlow(items, records, renameItem)
+  const password = usePasswordFlow()
 
   /** 按 id 反查物品 —— 记录页改的是**物品**，不是这一条记录 */
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
@@ -68,23 +70,44 @@ export function RecordsPage({
 
   const filterActive = Boolean(search.trim() || filterType !== 'all' || dateFrom || dateTo)
 
-  const handleDelete = async (record: StockRecord): Promise<void> => {
-    // 确认框里把「这条记录是谁的、货交给了谁」都写出来。
-    // 撤销是反向冲销库存的破坏性操作，宁可信息多一行，也别让人靠记忆判断点没点错。
+  /**
+   * 撤销一条记录（需口令）。
+   *
+   * 口令框里把「这条记录是谁的、货交给了谁」都写出来 —— 原来是靠一个
+   * `window.confirm` 做二次确认，现在**合并成一步**：既确认又输口令，
+   * 比「先确认、再输口令」少一次交互，信息一行都没少。
+   *
+   * 撤销会反向冲销库存且不可逆（没有「重做」），所以从 2026-10-02 起要口令。
+   */
+  const handleDelete = (record: StockRecord): void => {
     const lines = [
-      `确定撤销这条记录？`,
-      '',
       `${displayDateTime(record.time)}  ${record.name}  ${record.type === 'in' ? '入库' : '出库'} ${formatQuantity(record.quantity)} ${record.unit}`
     ]
     if (record.operator) lines.push(`操作人：${record.operator}`)
     if (record.handler) lines.push(`${handlerLabel(record.type)}：${record.handler}`)
-    // eslint-disable-next-line no-alert
-    if (!window.confirm(lines.join('\n'))) return
-    const result = await deleteRecord(record.id)
-    if ((result as { ok: boolean; warning?: string }).warning) {
-      // eslint-disable-next-line no-alert
-      alert((result as { warning: string }).warning)
-    }
+
+    password.request({
+      title: '撤销这条记录？',
+      message: `${lines.join('\n')}\n\n撤销会反向冲销它对库存的影响，不可恢复。`,
+      confirmLabel: '撤销',
+      danger: true,
+      onConfirm: (pwd) => {
+        void deleteRecord(record.id, pwd).then((result) => {
+          if (!result.ok) {
+            // 口令错时口令框自己已经提示过了，别在这儿再弹一个
+            if (!result.wrongPassword) {
+              // eslint-disable-next-line no-alert
+              alert(`撤销失败：${result.error}`)
+            }
+            return
+          }
+          if (result.warning) {
+            // eslint-disable-next-line no-alert
+            alert(result.warning)
+          }
+        })
+      }
+    })
   }
 
   const handleExport = async (): Promise<void> => {
@@ -293,7 +316,7 @@ export function RecordsPage({
                   <button
                     type="button"
                     className="btn btn-sm btn-danger"
-                    onClick={() => void handleDelete(record)}
+                    onClick={() => handleDelete(record)}
                   >
                     撤销
                   </button>
@@ -305,6 +328,7 @@ export function RecordsPage({
       )}
 
       {rename.dialog}
+      {password.dialog}
     </section>
   )
 }

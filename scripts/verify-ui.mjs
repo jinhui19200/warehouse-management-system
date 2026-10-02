@@ -297,10 +297,23 @@ async function run(page, shot) {
   // ── 1. 首屏 ──────────────────────────────────────────────
   section('1. 首屏与桥接')
   check('界面已挂载', (await page.evaluate(() => document.querySelectorAll('#root *').length)) > 0)
-  const bridge = await page.evaluate(
+  /*
+   * 原来这条读的是标题旁那行「主进程通道正常（返回 pong）」。
+   * 2026-10-02 把那行小字隐藏了（用户不需要看），所以改成**直接探桥接本身** ——
+   * 比「看界面上有没有字」更接近真正要验的东西。
+   */
+  const ping = await page.evaluate(async () => {
+    try {
+      return String(await window.api.ping())
+    } catch (e) {
+      return `ERR:${String(e)}`
+    }
+  })
+  check('渲染进程能调到主进程桥接（ping 有返回）', !ping.startsWith('ERR:'), ping)
+  const bridgeText = await page.evaluate(
     () => document.querySelector('.bridge-status')?.textContent ?? ''
   )
-  check('处于演示模式（非 Electron 环境，提示未检测到主进程）', bridge.length > 0, bridge)
+  check('正常状态下标题旁不显示状态小字', bridgeText.length === 0, JSON.stringify(bridgeText))
   check('无「已从备份恢复」提示条', (await page.evaluate(() => !document.querySelector('.warn-banner'))))
   const tabs = await page.evaluate(() =>
     [...document.querySelectorAll('button.tab')].map((b) => b.textContent.trim())
@@ -1699,32 +1712,52 @@ async function run(page, shot) {
     rowText(firstRow)
   )
 
-  // 撤销确认之后代码还会弹一个「库存变为负数」的 alert，它同样是一条 dialog，
-  // 于是 `dialogs.at(-1)` 指向的是那个 alert 而不是确认框。
-  // 要断言确认框的内容，就得按类型把 confirm 挑出来。
-  const lastConfirm = () => [...dialogs].reverse().find((d) => d.type === 'confirm')
-
+  /*
+   * 撤销自 2026-10-02 起要口令 —— 原来的 `window.confirm` 换成了口令框，
+   * 而且**合并成一步**：既确认（写清是哪条记录、货交给了谁）又输口令。
+   */
+  dialogs.length = 0
   await page.evaluate(() => {
     ;[...document.querySelectorAll('tbody tr')][0].querySelector('button').click()
   })
-  await page.waitForTimeout(800)
+  await page.waitForSelector('.modal-overlay')
+  await page.waitForTimeout(300)
+  check('点撤销 → 弹出口令框（不再是浏览器 confirm）', (await page.locator('.modal-overlay').count()) === 1)
   check(
-    '弹出确认框（内容是撤销确认，不是那个库存告警）',
-    lastConfirm()?.message.includes('确定撤销这条记录') === true,
-    JSON.stringify(dialogs.at(-1) ?? {})
+    '口令框标题是「撤销这条记录？」',
+    ((await page.locator('.modal h3').textContent()) ?? '').trim() === '撤销这条记录？',
+    await page.locator('.modal h3').textContent()
   )
+  const undoText = (await page.locator('.modal-text').textContent()) ?? ''
+  check('口令框里写明了记录内容', /铜线 1\.5mm²/.test(undoText), undoText.replace(/\s+/g, ' ').slice(0, 90))
+  // 撤销是反向冲销库存的破坏性操作，框里要能看出「货交给了谁」
   check(
-    '确认框写明了记录内容与操作人',
-    lastConfirm()?.message.includes('铜线 1.5mm²') === true,
-    lastConfirm()?.message.replace(/\s+/g, ' ')
+    '口令框里带上了经手人（入库用「经手人」这个叫法）',
+    /经手人：赵六/.test(undoText),
+    undoText.replace(/\s+/g, ' ').slice(0, 90)
   )
-  // 撤销是反向冲销库存的破坏性操作，确认框里要能看出「货交给了谁」
-  check(
-    '确认框里带上了经手人（入库用「经手人」这个叫法）',
-    lastConfirm()?.message.includes('经手人：赵六') === true,
-    lastConfirm()?.message.replace(/\s+/g, ' ')
-  )
+  check('口令框说明了撤销的后果', /反向冲销/.test(undoText), undoText.replace(/\s+/g, ' ').slice(0, 90))
+
+  // 口令错：一步都不许往下走
+  await page.locator('.modal input[type="password"]').fill('000000')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(350)
+  check('口令错误 → 对话框不关', (await page.locator('.modal-overlay').count()) === 1)
+  check('口令错误 → 框内给出提示', (await page.locator('.modal-error').count()) >= 1)
+  check('口令错误 → 记录数没变（没被撤销掉）', (await rowCount(page)) === 35, `${await rowCount(page)}`)
+
+  // 口令对：撤销
+  await page.locator('.modal input[type="password"]').fill('771204')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(900)
+  check('口令正确 → 对话框关闭', (await page.locator('.modal-overlay').count()) === 0)
   check('记录数回到 34（只撤销掉那一条）', (await rowCount(page)) === 34, `${await rowCount(page)}`)
+  // 撤销入库 45 会让铜线库存变负，那条告警仍要照常弹
+  check(
+    '撤销后照常弹出「库存变为负数」告警',
+    dialogs.some((d) => /库存变为负数/.test(d.message)),
+    JSON.stringify(dialogs.map((d) => d.message.slice(0, 50)))
+  )
   await switchTab(page, '仓库')
   await page.waitForTimeout(400)
   const undone = await warehouseRow(page, '铜线 1.5mm²')

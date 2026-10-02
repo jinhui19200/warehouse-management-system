@@ -97,7 +97,8 @@ export type TransactionResult =
 
 export type DeleteRecordResult =
   | { ok: true; removed: StockRecord; item: Item | null; warning?: string }
-  | { ok: false; error: string }
+  /** 撤销自 2026-10-02 起需要口令，`wrongPassword` 用来把「口令不对」和别的失败分开 */
+  | { ok: false; error: string; wrongPassword?: boolean }
 
 /** 修改物品警戒值 */
 export type SetThresholdResult = { ok: true; item: Item } | { ok: false; error: string }

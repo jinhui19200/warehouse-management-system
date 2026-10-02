@@ -1,6 +1,6 @@
 {
   "name": "warehouse-manager",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "库存管理系统 —— 仓库、记录、出入库操作",
   "main": "./out/main/index.js",
   "author": "lin",
@@ -12,7 +12,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "verify:store": "esbuild scripts/verify-store.ts --bundle --platform=node --format=esm --alias:@shared=./src/shared --outfile=out/verify-store.mjs --log-level=warning && node out/verify-store.mjs",
-    "verify:electron": "esbuild scripts/verify-electron.ts --bundle --platform=node --format=cjs --external:electron --alias:@shared=./src/shared --outfile=out/verify-electron.cjs --log-level=warning && electron out/verify-electron.cjs",
+    "verify:electron": "npm run build && esbuild scripts/verify-electron.ts --bundle --platform=node --format=cjs --external:electron --alias:@shared=./src/shared --outfile=out/verify-electron.cjs --log-level=warning && electron out/verify-electron.cjs",
     "verify:ui": "npm run build && node scripts/verify-ui.mjs",
     "verify:app": "npm run build && node scripts/verify-app.mjs",
     "verify:packaged": "node scripts/verify-packaged.mjs",

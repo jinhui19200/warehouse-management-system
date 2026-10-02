@@ -337,10 +337,15 @@ try {
   const pong = await page.evaluate(() => window.api.ping())
   check('IPC 往返 ping → pong', pong === 'pong', String(pong))
 
+  /*
+   * 原来这条读的是标题旁那行「主进程通道正常（返回 pong）」。
+   * 2026-10-02 把那行小字隐藏了（用户不需要看），所以改成验「正常时不显示」——
+   * 桥接本身在上一条 `ping → pong` 里已经验过了。
+   */
   const bridge = await page.evaluate(
     () => document.querySelector('.bridge-status')?.textContent ?? ''
   )
-  check('界面状态显示「主进程通道正常」', bridge.includes('主进程通道正常'), bridge)
+  check('正常状态下标题旁不显示状态小字', bridge === '', JSON.stringify(bridge))
 
   const dataPath = await page.evaluate(() => window.api.getDataPath())
   check('数据文件落在临时目录内（未碰真实数据）', dataPath === dataFile, dataPath)
@@ -443,8 +448,27 @@ try {
   await page2.evaluate(() => {
     ;[...document.querySelectorAll('tbody tr')][0].querySelector('button').click()
   })
-  await sleep(800)
-  check('撤销弹出确认框', dialogs.some((m) => m.includes('确定撤销这条记录')), JSON.stringify(dialogs.at(-1) ?? '(无)'))
+  // 撤销自 2026-10-02 起要口令：原来的 window.confirm 换成了口令框
+  await page2.waitForSelector('.modal-overlay')
+  await sleep(300)
+  check('撤销弹出口令框（不再是浏览器 confirm）', (await page2.locator('.modal-overlay').count()) === 1)
+  check(
+    '口令框标题是「撤销这条记录？」',
+    ((await page2.locator('.modal h3').textContent()) ?? '').trim() === '撤销这条记录？',
+    await page2.locator('.modal h3').textContent()
+  )
+
+  // 口令错 → 不许撤销
+  await page2.locator('.modal input[type="password"]').fill('000000')
+  await page2.locator('.modal .btn-danger').click()
+  await sleep(400)
+  check('口令错误 → 对话框不关', (await page2.locator('.modal-overlay').count()) === 1)
+  check('口令错误 → 记录仍是 2 条', (await rowCount(page2)) === 2, `${await rowCount(page2)}`)
+
+  await page2.locator('.modal input[type="password"]').fill('771204')
+  await page2.locator('.modal .btn-danger').click()
+  await sleep(900)
+  check('口令正确 → 对话框关闭', (await page2.locator('.modal-overlay').count()) === 0)
   check('撤销后记录 1 条', (await rowCount(page2)) === 1, `${await rowCount(page2)}`)
   await switchTab(page2, '仓库')
   await sleep(400)

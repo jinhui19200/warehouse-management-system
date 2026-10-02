@@ -173,7 +173,17 @@ async function main(): Promise<void> {
   const beforeQty = getSnapshot().items.find((i) => i.name === 'M3螺丝')!.quantity
   const inRec = getSnapshot().records.find((rec) => rec.type === 'in' && rec.name === 'M3螺丝')!
   const recCountBefore = getSnapshot().records.length
-  const d = await deleteRecord(inRec.id)
+
+  // 撤销自 2026-10-02 起要口令（会反向冲销库存、不可逆）
+  const dBad = await deleteRecord(inRec.id, '000000')
+  check(
+    '口令错 → 拒绝撤销',
+    dBad.ok === false && dBad.wrongPassword === true,
+    JSON.stringify(dBad)
+  )
+  check('口令错 → 记录一条没少', getSnapshot().records.length === recCountBefore)
+
+  const d = await deleteRecord(inRec.id, QUANTITY_EDIT_PASSWORD)
   check('撤销成功', d.ok === true, d.ok ? '' : d.error)
   const afterQty = getSnapshot().items.find((i) => i.name === 'M3螺丝')!.quantity
   check(
@@ -182,12 +192,15 @@ async function main(): Promise<void> {
     `${beforeQty} → ${afterQty}`
   )
   check('记录数减少 1', getSnapshot().records.length === recCountBefore - 1)
-  check('撤销不存在的记录被拒绝', (await deleteRecord('不存在的id')).ok === false)
+  check(
+    '撤销不存在的记录被拒绝',
+    (await deleteRecord('不存在的id', QUANTITY_EDIT_PASSWORD)).ok === false
+  )
 
   section('11. 撤销出库记录应加回库存')
   const outRec = getSnapshot().records.find((rec) => rec.type === 'out')!
   const q0 = getSnapshot().items.find((i) => i.name === 'M3螺丝')!.quantity
-  await deleteRecord(outRec.id)
+  await deleteRecord(outRec.id, QUANTITY_EDIT_PASSWORD)
   const q1 = getSnapshot().items.find((i) => i.name === 'M3螺丝')!.quantity
   check(
     `撤销一条出库 ${outRec.quantity} → 库存增加 ${outRec.quantity}`,

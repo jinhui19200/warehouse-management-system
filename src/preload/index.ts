@@ -53,9 +53,9 @@ const api = {
   applyTransaction: (input: TransactionInput): Promise<TransactionResult> =>
     ipcRenderer.invoke('db:transaction', input),
 
-  /** 撤销记录（会反向冲销库存） */
-  deleteRecord: (id: string): Promise<DeleteRecordResult> =>
-    ipcRenderer.invoke('db:deleteRecord', id),
+  /** 撤销记录（会反向冲销库存，需口令；校验在数据层） */
+  deleteRecord: (id: string, password: string): Promise<DeleteRecordResult> =>
+    ipcRenderer.invoke('db:deleteRecord', id, password),
 
   /** 修改物品警戒值 */
   setItemThreshold: (id: string, threshold: number): Promise<SetThresholdResult> =>

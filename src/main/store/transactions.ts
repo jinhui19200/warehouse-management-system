@@ -127,8 +127,20 @@ export function applyTransaction(input: TransactionInput): Promise<TransactionRe
 }
 
 /** 撤销一条记录，并**反向冲销**它对库存的影响。 */
-export function deleteRecord(id: string): Promise<DeleteRecordResult> {
+export function deleteRecord(id: string, password: unknown): Promise<DeleteRecordResult> {
   return enqueue(async () => {
+    /*
+     * 撤销会**反向冲销库存** —— 删掉一条入库记录，库存就减回去。
+     * 它和「删除物品」一样是不可逆的破坏性操作（没有「重做」），
+     * 所以 2026-10-02 起同样要求口令。
+     *
+     * 校验点在数据层而不是界面：界面上那个口令框只是交互，
+     * 绕过它直接 invoke `db:deleteRecord` 必须同样被拒。
+     */
+    if (!matchesQuantityPassword(password)) {
+      return { ok: false, error: '口令不正确', wrongPassword: true }
+    }
+
     const current = await load()
     const index = current.records.findIndex((r) => r.id === id)
     if (index < 0) return { ok: false, error: '记录不存在，可能已被删除' }

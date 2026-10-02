@@ -17,7 +17,14 @@ const TABS: { key: TabKey; label: string }[] = [
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>('warehouse')
-  const [bridge, setBridge] = useState('通道检测中…')
+  /**
+   * 主进程通道的**异常**信息。正常时是空串 —— 也就是什么都不显示。
+   *
+   * 原来这里放的是「主进程通道正常（返回 pong）」，那行字是给开发看的：
+   * 用户既看不懂、也不关心，常年挂在标题旁边只是噪音（2026-10-02 隐藏）。
+   * 但**探不通时必须显示** —— 那时用户是真的什么也做不了，得知道为什么。
+   */
+  const [bridge, setBridge] = useState('')
   const [folderMsg, setFolderMsg] = useState('')
 
   const {
@@ -41,9 +48,9 @@ export default function App() {
   } = useAppData()
 
   useEffect(() => {
+    // 启动时探一次主进程通道。**只在失败时留下痕迹** —— 成功不显示任何东西
     Promise.resolve()
       .then(() => window.api.ping())
-      .then((r) => setBridge(`主进程通道正常（返回 ${r}）`))
       .catch(() => setBridge('未检测到主进程通道（当前非 Electron 环境）'))
   }, [])
 
@@ -61,9 +68,10 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>库存管理系统</h1>
-        <span className="bridge-status">
-          {error ? `数据读取异常：${error}` : bridge}
-        </span>
+        {/* 正常时一个字符都不显示；只有出错（或通道探不通）才占位 */}
+        {(error || bridge) && (
+          <span className="bridge-status">{error ? `数据读取异常：${error}` : bridge}</span>
+        )}
         <span className="header-spacer" />
         {folderMsg && <span className="header-msg">{folderMsg}</span>}
         <button
