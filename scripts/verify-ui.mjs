@@ -19,8 +19,9 @@
  *   VERIFY_UI_SHOTS=1 把截图写到 out/verify-ui/（out/ 已在 .gitignore 里）
  */
 import { spawn } from 'node:child_process'
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -156,7 +157,7 @@ const warehouseRow = (page, name) =>
       return out
     }
     const tr = [...document.querySelectorAll('tbody tr')].find(
-      (r) => r.querySelector('td')?.textContent?.trim() === n
+      (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
     )
     return tr ? read(tr) : null
   }, name)
@@ -164,6 +165,67 @@ const warehouseRow = (page, name) =>
 /** 把 { 表头名: 值 } 打成一行，失败信息里能看清到底取到了什么 */
 const rowText = (row) =>
   row ? Object.entries(row).map(([k, v]) => `${k}=${v}`).join(' / ') : '(没有这一行)'
+
+/*
+ * ── 月份相关的期望值，一律**按当天算**，绝不写死 ──────────────
+ *
+ * 报表页的默认窗口是「最近 12 个自然月」，而种子数据固定在 2025-10 ~ 2026-09。
+ * 于是「窗口里有哪些月份」是**相对今天**的：一进 10 月，窗口就整体前移成
+ * 2025-11 ~ 2026-10，原来写死的 '2025-10|…|2026-09' 必然变红 ——
+ * 而功能其实一点没坏。
+ *
+ * 这种「到日子就红」的断言比没有断言更糟：用两次就没人信了，
+ * 真出问题时也没人去看。所以下面全部改成按当天推算。
+ */
+
+/** 最近 count 个自然月（算法与 src/shared/utils.ts 的 recentMonths 一致） */
+const recentMonths = (count, from = new Date()) => {
+  const out = []
+  const y = from.getFullYear()
+  const m = from.getMonth()
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(y, m - i, 1)
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+  }
+  return out
+}
+
+/** 界面上「2025-10 ~ 2026-09」这种区间文案 */
+const rangeText = (months) => `${months[0]} ~ ${months[months.length - 1]}`
+
+const MONTHS12 = recentMonths(12)
+const RANGE_DEFAULT = rangeText(MONTHS12)
+
+/** 整窗口往更早的方向平移 n 个月之后的月份数组 */
+const monthsShifted = (n) => {
+  const d = new Date()
+  return recentMonths(12, new Date(d.getFullYear(), d.getMonth() - n, 1))
+}
+
+/** 同上，但要的是界面上那种区间文案 */
+const RANGE_SHIFTED = (n) => rangeText(monthsShifted(n))
+
+/**
+ * 种子数据里记录的月份跨度是 2025-10 ~ 2026-09（见 preview/mock.ts）。
+ * 「窗口外还有 N 个月」这类提示要拿它跟窗口两端比 —— 所以这两条依赖种子数据，
+ * 种子改了这里也要跟着改。
+ */
+const SEED_EARLIEST_MONTH = '2025-10'
+const SEED_LATEST_MONTH = '2026-09'
+
+/** 两个 `YYYY-MM` 相差的月数（to 晚于 from 时为正） */
+const monthDiff = (from, to) => {
+  const [fy, fm] = from.split('-').map(Number)
+  const [ty, tm] = to.split('-').map(Number)
+  return (ty - fy) * 12 + (tm - fm)
+}
+
+/**
+ * 某个窗口 [start, end] 之外还剩多少个月的种子数据。
+ * 两侧都算：更早的 + 更晚的（这正是界面那句提示的语义）。
+ */
+const monthsOutside = (start, end) =>
+  Math.max(0, monthDiff(SEED_EARLIEST_MONTH, start)) + Math.max(0, monthDiff(end, SEED_LATEST_MONTH))
 
 /**
  * 量表格：每列的表头与数据是否对齐、有没有列分割线。
@@ -267,6 +329,8 @@ async function run(page, shot) {
   )
   check('数值列表头与数据的对齐属性一致', numeric.every((c) => c.hAlign === c.dAlign))
   for (const c of cols) {
+    // 拖动柄列没有表头文字（它是一列操作控件，不是数据列），无从比对边缘
+    if (!c.head) continue
     check(
       `「${c.head}」表头与数据对齐（比${c.rightAligned ? '右' : '左'}边缘）`,
       c.edgeDelta !== null && Math.abs(c.edgeDelta) <= 2,
@@ -287,7 +351,7 @@ async function run(page, shot) {
   const qtyCell = (page, name) =>
     page.evaluate((n) => {
       const tr = [...document.querySelectorAll('tbody tr')].find(
-        (r) => r.querySelector('td')?.textContent?.trim() === n
+        (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
       )
       if (!tr) return null
       // 按表头名定位「数量」列，不按下标 —— 加列时下标会静默错位
@@ -309,7 +373,7 @@ async function run(page, shot) {
   const thresholdValue = (page, name) =>
     page.evaluate((n) => {
       const tr = [...document.querySelectorAll('tbody tr')].find(
-        (r) => r.querySelector('td')?.textContent?.trim() === n
+        (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
       )
       return tr ? tr.querySelector('.threshold-input').value : null
     }, name)
@@ -319,7 +383,7 @@ async function run(page, shot) {
     await page.evaluate(
       ([n, v]) => {
         const tr = [...document.querySelectorAll('tbody tr')].find(
-          (r) => r.querySelector('td')?.textContent?.trim() === n
+          (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
         )
         const input = tr.querySelector('.threshold-input')
         input.focus()
@@ -337,15 +401,27 @@ async function run(page, shot) {
     page.evaluate(() =>
       [...document.querySelectorAll('tbody tr')]
         .filter((r) => r.querySelector('td.below-threshold'))
-        .map((r) => r.querySelector('td')?.textContent?.trim())
+        .map((r) => r.querySelector('td.name-col')?.textContent?.trim())
     )
 
+  check('首列是拖动柄（没有表头文字）', cols[0]?.head === '', JSON.stringify(cols[0]?.head))
+  /*
+   * 列顺序断言刻意**不写死月份**。
+   *
+   * 表头是「本月入库（10月）」这种带月份的文字，写死月份就等于
+   * 「每到下一个月必然红一次」—— 那种会定期变红的断言用两次就没人信了。
+   * 所以把「本月…」统一折算成一个标记再比顺序。
+   */
+  const headKey = (h) => (h.startsWith('本月') ? '本月' : h)
   check(
-    '表头含「警戒值」列，且在「单位」之后',
-    cols.map((c) => c.head).join('|') === '名称|数量|单位|警戒值|本月入库（9月）|本月出库（9月）|操作',
+    '列顺序：名称 / 数量 / 单位 / 备注 / 警戒值 / 本月入库 / 本月出库 / 操作',
+    cols.map((c) => headKey(c.head)).filter(Boolean).join('|') ===
+      '名称|数量|单位|备注|警戒值|本月|本月|操作',
     cols.map((c) => c.head).join('|')
   )
-  check('警戒值列是数值列（右对齐）', cols[3].rightAligned, cols[3].hAlign)
+  // 按下标取列是脆的（加一列就错位），按表头名找
+  const thresholdCol = cols.find((c) => c.head === '警戒值')
+  check('警戒值列是数值列（右对齐）', thresholdCol?.rightAligned === true, thresholdCol?.hAlign)
 
   // 种子里的警戒值：螺丝 100 / 电阻 100 / 铜线 50 / 焊锡丝 10 / PCB 5
   check('螺丝警戒值显示 100', (await thresholdValue(page, 'M3×8 螺丝')) === '100', await thresholdValue(page, 'M3×8 螺丝'))
@@ -455,14 +531,14 @@ async function run(page, shot) {
   const whOrder = () =>
     page.evaluate(() =>
       [...document.querySelectorAll('tbody tr')].map((r) =>
-        r.querySelector('td')?.textContent?.trim()
+        r.querySelector('td.name-col')?.textContent?.trim()
       )
     )
   const whHits = () =>
     page.evaluate(() =>
       [...document.querySelectorAll('tbody tr')]
         .filter((r) => r.classList.contains('row-hit'))
-        .map((r) => r.querySelector('td')?.textContent?.trim())
+        .map((r) => r.querySelector('td.name-col')?.textContent?.trim())
     )
   const clickToolbar = (text) =>
     page.evaluate((t) => {
@@ -592,16 +668,20 @@ async function run(page, shot) {
       wbW.SheetNames.join(' | ')
     )
     const wrows = WXLSX.utils.sheet_to_json(wbW.Sheets['仓库台账'], { header: 1 })
+    // 月份列名按当天算（见文件上方 MONTHS12 的说明）；
+    // 「备注」是 v1.6.0 新增的列，夹在「单位」和「警戒值」之间
+    const exportMonth = `${Number(MONTHS12[11].slice(5))}月`
     check(
-      '表头为 名称/数量/单位/警戒值/本月入库（9月）/本月出库（9月）/状态',
+      '表头为 名称/数量/单位/备注/警戒值/本月入库/本月出库/状态',
       JSON.stringify(wrows[0]) ===
         JSON.stringify([
           '名称',
           '数量',
           '单位',
+          '备注',
           '警戒值',
-          '本月入库（9月）',
-          '本月出库（9月）',
+          `本月入库（${exportMonth}）`,
+          `本月出库（${exportMonth}）`,
           '状态'
         ]),
       JSON.stringify(wrows[0])
@@ -614,20 +694,186 @@ async function run(page, shot) {
       JSON.stringify(wrows.slice(1).map((r) => [r[0], r[1]]))
     )
     // 界面上低库存是浅红底色，导出成文件后颜色没了 —— 必须落成一列文字，否则这条信息就丢了
+    //
+    // 「状态」列的下标按**表头名**找，不写死 r[6]：
+    // 加一列（比如这次的「备注」）就会让写死的下标静默指向别列，
+    // 报出来的却是「状态列没标出」，看着像功能坏了
+    const statusIdx = wrows[0].indexOf('状态')
+    check('导出表里找得到「状态」列', statusIdx >= 0, JSON.stringify(wrows[0]))
     check(
       '低于警戒值的 3 种在「状态」列被标出',
-      wrows.slice(1).filter((r) => r[6] === '低于警戒值').length === 3,
-      JSON.stringify(wrows.slice(1).map((r) => [r[0], r[6]]))
+      wrows.slice(1).filter((r) => r[statusIdx] === '低于警戒值').length === 3,
+      JSON.stringify(wrows.slice(1).map((r) => [r[0], r[statusIdx]]))
     )
     check(
       '未低于警戒值的行状态列为空',
       wrows
         .slice(1)
         .filter((r) => ['M3×8 螺丝', '焊锡丝 0.8mm', '闲置物料 X'].includes(r[0]))
-        .every((r) => r[6] === ''),
-      JSON.stringify(wrows.slice(1).map((r) => [r[0], r[6]]))
+        .every((r) => r[statusIdx] === ''),
+      JSON.stringify(wrows.slice(1).map((r) => [r[0], r[statusIdx]]))
+    )
+    check(
+      '备注列导出的是物品备注（螺丝有、电阻为空）',
+      wrows
+        .slice(1)
+        .some((r) => r[0] === 'M3×8 螺丝' && r[wrows[0].indexOf('备注')] === '常用规格，注意防潮') &&
+        wrows
+          .slice(1)
+          .some((r) => r[0] === '贴片电阻 10kΩ' && r[wrows[0].indexOf('备注')] === ''),
+      JSON.stringify(wrows.slice(1).map((r) => [r[0], r[wrows[0].indexOf('备注')]]))
     )
   }
+
+  // ── 2e. v1.6.0 新增：备注 / 单位 / 只看低库存 / 拖动柄 / 表头置顶 ──
+  section('2e. 仓库页：备注、单位、只看低库存、拖动柄、表头置顶')
+
+  /** 取某一行某列的文本。列用**类名**定位，不按下标 —— 加一列就会错位 */
+  const cellText = (name, cls) =>
+    page.evaluate(
+      ([n, c]) =>
+        [...document.querySelectorAll('table.table tbody tr')]
+          .filter((r) => r.querySelector('td.name-col')?.textContent?.trim() === n)
+          .map((r) => r.querySelector(`td.${c}`)?.textContent?.trim())[0] ?? null,
+      [name, cls]
+    )
+
+  /*
+   * 名称列等于 name 的行下标。
+   * 刻意不复用后面的 whRowIdx：它是 const，在这里还处于暂时性死区
+   * （TDZ），调它只会抛 ReferenceError —— 报错信息看着像脚本写错了，
+   * 其实是「定义位置在使用之后」。
+   */
+  const rowIdxByName = (name) =>
+    page.evaluate(
+      (n) =>
+        [...document.querySelectorAll('table.table tbody tr')].findIndex(
+          (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
+        ),
+      name
+    )
+
+  check(
+    '备注列显示物品备注',
+    (await cellText('M3×8 螺丝', 'note-cell')) === '常用规格，注意防潮',
+    String(await cellText('M3×8 螺丝', 'note-cell'))
+  )
+  check(
+    '没填备注的显示「—」（不是空白）',
+    (await cellText('贴片电阻 10kΩ', 'note-cell')) === '—',
+    String(await cellText('贴片电阻 10kΩ', 'note-cell'))
+  )
+
+  // 双击备注 → 行内编辑 → 回车保存（与改名同一套交互）
+  const screwIdx = await rowIdxByName('M3×8 螺丝')
+  await page.locator('table.table tbody tr').nth(screwIdx).locator('td.note-cell .editable-text').dblclick()
+  check('双击备注进入编辑态', (await page.locator('td.note-cell input.name-input').count()) === 1)
+  await page.locator('td.note-cell input.name-input').fill('改成新的备注')
+  await page.locator('td.note-cell input.name-input').press('Enter')
+  await page.waitForTimeout(400)
+  check(
+    '备注保存成功（界面上已变）',
+    (await cellText('M3×8 螺丝', 'note-cell')) === '改成新的备注',
+    String(await cellText('M3×8 螺丝', 'note-cell'))
+  )
+
+  // 右键也要能改（第二个入口）
+  await page.locator('table.table tbody tr').nth(await rowIdxByName('M3×8 螺丝')).locator('td.note-cell .editable-text').click({ button: 'right' })
+  check('右键备注 → 弹出菜单', await page.locator('.ctx-menu').isVisible())
+  check(
+    '菜单里有「修改备注」',
+    (await page.locator('.ctx-menu .ctx-item').allTextContents()).includes('修改备注'),
+    (await page.locator('.ctx-menu .ctx-item').allTextContents()).join('|')
+  )
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(150)
+
+  // 单位双击可改（改完立刻改回去，免得影响后面记录页/报表页的断言）
+  await page.locator('table.table tbody tr').nth(await rowIdxByName('M3×8 螺丝')).locator('td.unit-col .editable-text').dblclick()
+  check('双击单位进入编辑态', (await page.locator('td.unit-col input.name-input').count()) === 1)
+  await page.locator('td.unit-col input.name-input').fill('盒')
+  await page.locator('td.unit-col input.name-input').press('Enter')
+  await page.waitForTimeout(400)
+  check(
+    '单位改成功（个 → 盒）',
+    (await cellText('M3×8 螺丝', 'unit-col')) === '盒',
+    String(await cellText('M3×8 螺丝', 'unit-col'))
+  )
+  await page.locator('table.table tbody tr').nth(await rowIdxByName('M3×8 螺丝')).locator('td.unit-col .editable-text').dblclick()
+  await page.locator('td.unit-col input.name-input').fill('个')
+  await page.locator('td.unit-col input.name-input').press('Enter')
+  await page.waitForTimeout(400)
+  check(
+    '单位改回「个」',
+    (await cellText('M3×8 螺丝', 'unit-col')) === '个',
+    String(await cellText('M3×8 螺丝', 'unit-col'))
+  )
+
+  // ── 只看低于警戒值（表头「警戒值」旁的小方框） ──────────
+  check('默认不勾选「只看低库存」，6 种全显示', (await rowCount(page)) === 6, `${await rowCount(page)}`)
+  await page.locator('thead input[type="checkbox"]').check()
+  await page.waitForTimeout(300)
+  check('勾选后只剩低于警戒值的 3 种', (await rowCount(page)) === 3, `${await rowCount(page)}`)
+  const lowOnlyNames = await page.evaluate(() =>
+    [...document.querySelectorAll('table.table tbody tr')].map(
+      (r) => r.querySelector('td.name-col')?.textContent?.trim()
+    )
+  )
+  check(
+    '剩下的是电阻 / 铜线 / PCB（不是随便三行）',
+    ['贴片电阻 10kΩ', '铜线 1.5mm²', 'PCB 打样板'].every((n) => lowOnlyNames.includes(n)),
+    lowOnlyNames.join('、')
+  )
+  await page.locator('thead input[type="checkbox"]').uncheck()
+  await page.waitForTimeout(300)
+  check('取消勾选后恢复 6 种', (await rowCount(page)) === 6, `${await rowCount(page)}`)
+
+  // ── 拖动柄 ───────────────────────────────────────────────
+  const handle = await page.evaluate(() => {
+    const h = document.querySelector('tbody tr td.drag-cell .drag-handle')
+    if (!h) return null
+    return {
+      draggable: h.getAttribute('draggable'),
+      bars: h.querySelectorAll('.drag-bars').length,
+      rows: document.querySelectorAll('tbody tr td.drag-cell').length
+    }
+  })
+  check('每行最左端都有拖动柄', handle !== null && handle.rows === 6, JSON.stringify(handle))
+  check('拖动柄是可拖动的（draggable=true）', handle?.draggable === 'true', JSON.stringify(handle))
+
+  // ── 表头置顶 ─────────────────────────────────────────────
+  /*
+   * 要验「滚动时表头不动」，前提是表格**真的能滚** ——
+   * 而 6 行数据在正常视口下根本撑不满容器。
+   * 所以临时把视口压矮，逼出滚动条，测完再恢复。
+   */
+  const vp = page.viewportSize()
+  await page.setViewportSize({ width: vp?.width ?? 1180, height: 360 })
+  await page.waitForTimeout(300)
+  const sticky = await page.evaluate(async () => {
+    const box = document.querySelector('.table-scroll')
+    if (!box) return null
+    const th = box.querySelector('thead th')
+    const before = Math.round(th.getBoundingClientRect().top)
+    box.scrollTop = 200
+    await new Promise((r) => requestAnimationFrame(r))
+    return {
+      before,
+      after: Math.round(th.getBoundingClientRect().top),
+      boxTop: Math.round(box.getBoundingClientRect().top),
+      scrollTop: box.scrollTop,
+      position: getComputedStyle(th).position
+    }
+  })
+  check('表格区域可独立滚动（内容超出容器）', sticky !== null && sticky.scrollTop > 0, JSON.stringify(sticky))
+  check('表头是 sticky 定位', sticky?.position === 'sticky', String(sticky?.position))
+  check(
+    '滚动后表头仍贴在容器顶部（置顶生效）',
+    sticky !== null && Math.abs(sticky.after - sticky.boxTop) <= 2,
+    JSON.stringify(sticky)
+  )
+  await page.setViewportSize(vp ?? { width: 1180, height: 800 })
+  await page.waitForTimeout(300)
 
   // ── 2c. 报表页：双向柱状图 ───────────────────────────────
   section('2c. 报表页：入库在上 / 出库在下')
@@ -703,12 +949,12 @@ async function run(page, shot) {
     check(
       '横轴是最近 12 个自然月（默认窗口）',
       card.months.join('|') ===
-        '2025-10|2025-11|2025-12|2026-01|2026-02|2026-03|2026-04|2026-05|2026-06|2026-07|2026-08|2026-09',
+        MONTHS12.join('|'),
       card.months.join('|')
     )
     check(
       '月份短标签正确（12 月是两位数）',
-      card.labels.join('|') === '10月|11月|12月|1月|2月|3月|4月|5月|6月|7月|8月|9月',
+      card.labels.join('|') === MONTHS12.map((m) => `${Number(m.slice(5))}月`).join('|'),
       card.labels.join('|')
     )
 
@@ -880,10 +1126,25 @@ async function run(page, shot) {
       // 分别取元素比按整串比更稳
       return [...c.querySelectorAll('.report-total b')].map((b) => b.textContent.trim())
     })
+    /*
+     * 合计栏**不能写死数字**：它算的是「窗口内」的出入库总和，
+     * 而窗口是最近 12 个月 —— 月份一滑，某些记录就进出窗口了
+     * （种子数据固定，窗口却是相对今天的）。
+     *
+     * 改成自洽性检查：合计 ≈ 各柱数值之和（按刻度从柱高反推）。
+     * 每根柱高都取整过，12 根累积起来给一点容差；
+     * 这个容差远小于「整月算错」（一个月的量级是几百），所以照样能抓住真错。
+     */
+    const sumOfBars = (bars) => bars.reduce((s, b) => s + (b.h / card.halfH) * scaleMax, 0)
+    const expectIn = Math.round(sumOfBars(card.barsIn))
+    const expectOut = Math.round(sumOfBars(card.barsOut))
+    const toNum = (t) => Number(String(t).replace(/[^\d.-]/g, ''))
     check(
-      '卡片头部合计 = 入 1095 / 出 380',
-      totals?.join(' | ') === '入 1095 | 出 380',
-      JSON.stringify(totals)
+      `卡片头部合计与窗口内柱子之和一致（入 ≈ ${expectIn} / 出 ≈ ${expectOut}）`,
+      totals !== null &&
+        Math.abs(toNum(totals[0]) - expectIn) <= 60 &&
+        Math.abs(toNum(totals[1]) - expectOut) <= 60,
+      `${JSON.stringify(totals)} vs 柱子推算 入 ${expectIn} / 出 ${expectOut}`
     )
   }
 
@@ -913,7 +1174,7 @@ async function run(page, shot) {
       [...idle.barsIn, ...idle.barsOut].every((b) => b.value === null)
     )
     // 月份标签要照常显示 —— 否则用户分不清「没数据」和「图没画出来」
-    check('零出入库时横轴月份仍在', idle.months.length === 12 && idle.months[0] === '2025-10', idle.months.join('|'))
+    check('零出入库时横轴月份仍在', idle.months.length === 12 && idle.months[0] === MONTHS12[0], idle.months.join('|'))
   }
   check(
     '有出入库的卡片不显示「无出入库」说明',
@@ -969,23 +1230,46 @@ async function run(page, shot) {
 
   const SCREW = 'M3×8 螺丝'
   const RESISTOR = '贴片电阻 10kΩ'
-  const DEFAULT_RANGE = '2025-10 ~ 2026-09'
+  const DEFAULT_RANGE = RANGE_DEFAULT
 
   let screwBar = await cardBar(SCREW)
   check('默认区间是最近 12 个月', screwBar.range === DEFAULT_RANGE, screwBar.range)
   check('「更晚」默认禁用（不能滑向未来）', screwBar.laterDisabled === true)
   check('「更早」默认可用（有更早的数据）', screwBar.earlierDisabled === false)
   check('默认不显示「回到最新」', screwBar.hasReset === false)
-  check('默认没有「窗口外还有…」提示', screwBar.note === null, String(screwBar.note))
+  /*
+   * 「默认有没有窗口外提示」**取决于当天是几月**：
+   * 默认窗口是最近 12 个月，而种子数据只铺到 2026-09 ——
+   * 今天是 2026-09 时窗口刚好全覆盖（无提示），今天是 10 月时
+   * 2025-10 那批记录就滑到窗口外了（**该**有提示）。
+   * 所以这条不能写死「没有提示」，否则每月都会假红一次。
+   */
+  const outsideDefault = monthsOutside(MONTHS12[0], MONTHS12[11])
+  check(
+    outsideDefault > 0
+      ? `默认窗口外确实还有 ${outsideDefault} 个月的种子数据，界面给出提示`
+      : '默认窗口已覆盖全部种子数据，不显示「窗口外」提示',
+    outsideDefault > 0
+      ? /^窗口外还有 \d+ 个月的记录$/.test(screwBar.note ?? '')
+      : screwBar.note === null,
+    String(screwBar.note)
+  )
 
   await clickCardBtn(SCREW, '◀ 更早')
   screwBar = await cardBar(SCREW)
-  check('点一次「更早」，这张卡的区间前移一个月', screwBar.range === '2025-09 ~ 2026-08', screwBar.range)
+  check('点一次「更早」，这张卡的区间前移一个月', screwBar.range === RANGE_SHIFTED(1), screwBar.range)
   check('平移后「更晚」变为可用', screwBar.laterDisabled === false)
   check('平移后出现「回到最新」', screwBar.hasReset === true)
+  // 前移一个月后，窗口外还剩多少**取决于当天**（同上面那条），所以按实际情况断言
+  const shiftedWindow = monthsShifted(1)
+  const outsideShifted = monthsOutside(shiftedWindow[0], shiftedWindow[11])
   check(
-    '出现「窗口外还有 N 个月的记录」提示（两侧都算）',
-    /^窗口外还有 \d+ 个月的记录$/.test(screwBar.note ?? ''),
+    outsideShifted > 0
+      ? `前移一个月后窗口外还有 ${outsideShifted} 个月的记录，界面给出提示`
+      : '前移一个月后窗口仍覆盖全部种子数据，不显示「窗口外」提示',
+    outsideShifted > 0
+      ? /^窗口外还有 \d+ 个月的记录$/.test(screwBar.note ?? '')
+      : screwBar.note === null,
     String(screwBar.note)
   )
 
@@ -1057,7 +1341,7 @@ async function run(page, shot) {
   await page.mouse.up()
   await page.waitForTimeout(300)
   screwBar = await cardBar(SCREW)
-  check('在螺丝卡片上往右拖 130px ≈ 前移 2 个月', screwBar.range === '2025-08 ~ 2026-07', screwBar.range)
+  check('在螺丝卡片上往右拖 130px ≈ 前移 2 个月', screwBar.range === RANGE_SHIFTED(2), screwBar.range)
   const resBar1 = await cardBar(RESISTOR)
   check(
     '★ 拖动之后另一张卡仍未受影响',
@@ -1078,8 +1362,8 @@ async function run(page, shot) {
   check('页面上有且只有一个表格', tables.length === 1, `${tables.length}`)
   cols = tables[0]
   check(
-    '表头为 时间/名称/数量/单位/操作人/经手人/领取人/类型/操作',
-    cols.map((c) => c.head).join('|') === '时间|名称|数量|单位|操作人|经手人/领取人|类型|操作',
+    '表头为 时间/名称/数量/单位/备注/操作人/经手人/领取人/类型/操作',
+    cols.map((c) => c.head).join('|') === '时间|名称|数量|单位|备注|操作人|经手人/领取人|类型|操作',
     cols.map((c) => c.head).join('|')
   )
   check('没有空表头（历史缺陷：按钮列没有表头）', cols.every((c) => c.head !== ''))
@@ -1552,9 +1836,9 @@ async function run(page, shot) {
     check('能被 xlsx 解析出唯一工作表「出入库记录」',
       wb.SheetNames.length === 1 && wb.SheetNames[0] === '出入库记录', wb.SheetNames.join(' | '))
     const rows = XLSX.utils.sheet_to_json(wb.Sheets['出入库记录'], { header: 1 })
-    check('表头为 时间/名称/数量/单位/操作人/经手人/领取人/类型',
+    check('表头为 时间/名称/数量/单位/备注/操作人/经手人/领取人/类型',
       JSON.stringify(rows[0]) ===
-        JSON.stringify(['时间', '名称', '数量', '单位', '操作人', '经手人/领取人', '类型']),
+        JSON.stringify(['时间', '名称', '数量', '单位', '备注', '操作人', '经手人/领取人', '类型']),
       JSON.stringify(rows[0]))
     check('数据行数与界面上的记录数一致（表头之外）', rows.length - 1 === exportRows,
       `表里 ${rows.length - 1} 行 / 界面 ${exportRows} 行`)
@@ -1619,7 +1903,7 @@ async function run(page, shot) {
   const whRowIdx = (page, name) =>
     page.evaluate((n) => {
       const rows = [...document.querySelectorAll('table.table tbody tr')]
-      return rows.findIndex((r) => r.querySelector('td')?.textContent?.trim() === n)
+      return rows.findIndex((r) => r.querySelector('td.name-col')?.textContent?.trim() === n)
     }, name)
 
   /** 记录页里「名称」列等于 name 的第一行下标（按表头名取列，不按下标） */
@@ -1636,7 +1920,7 @@ async function run(page, shot) {
   const whNames = (page) =>
     page.evaluate(() =>
       [...document.querySelectorAll('table.table tbody tr')].map(
-        (r) => r.querySelector('td')?.textContent?.trim() ?? ''
+        (r) => r.querySelector('td.name-col')?.textContent?.trim() ?? ''
       )
     )
 
@@ -1684,8 +1968,8 @@ async function run(page, shot) {
   check('仓库页里旧名称已消失', !(await whNames(page)).includes(OLD))
   check('改名不改物品数量（12 卷还在）', await page.evaluate(() =>
     [...document.querySelectorAll('table.table tbody tr')]
-      .filter((r) => r.querySelector('td')?.textContent?.trim() === '焊锡丝 无铅')
-      .map((r) => r.querySelectorAll('td')[1]?.textContent?.trim())[0] === '12'
+      .filter((r) => r.querySelector('td.name-col')?.textContent?.trim() === '焊锡丝 无铅')
+      .map((r) => r.querySelector('td.qty-col')?.textContent?.trim())[0] === '12'
   ))
 
   // ── 三页同步 ─────────────────────────────────────────────
@@ -1755,15 +2039,15 @@ async function run(page, shot) {
   const pcbQty = await page.evaluate(() =>
     Number(
       [...document.querySelectorAll('table.table tbody tr')]
-        .filter((r) => r.querySelector('td')?.textContent?.trim() === 'PCB 打样板')
-        .map((r) => r.querySelectorAll('td')[1]?.textContent?.trim())[0]
+        .filter((r) => r.querySelector('td.name-col')?.textContent?.trim() === 'PCB 打样板')
+        .map((r) => r.querySelector('td.qty-col')?.textContent?.trim())[0]
     )
   )
   const solderQty = await page.evaluate(() =>
     Number(
       [...document.querySelectorAll('table.table tbody tr')]
-        .filter((r) => r.querySelector('td')?.textContent?.trim() === '焊锡丝 免洗')
-        .map((r) => r.querySelectorAll('td')[1]?.textContent?.trim())[0]
+        .filter((r) => r.querySelector('td.name-col')?.textContent?.trim() === '焊锡丝 免洗')
+        .map((r) => r.querySelector('td.qty-col')?.textContent?.trim())[0]
     )
   )
 
@@ -1819,8 +2103,8 @@ async function run(page, shot) {
       for (let i = 0; i < 40; i++) {
         const q = await page.evaluate(() =>
           [...document.querySelectorAll('table.table tbody tr')]
-            .filter((r) => r.querySelector('td')?.textContent?.trim() === 'PCB 打样板')
-            .map((r) => r.querySelectorAll('td')[1]?.textContent?.trim())[0]
+            .filter((r) => r.querySelector('td.name-col')?.textContent?.trim() === 'PCB 打样板')
+            .map((r) => r.querySelector('td.qty-col')?.textContent?.trim())[0]
         )
         if (Number(q) === pcbQty + solderQty) return true
         await sleep(100)
@@ -1833,8 +2117,8 @@ async function run(page, shot) {
     '合并后单位用的是选中的「卷」',
     await page.evaluate(() =>
       [...document.querySelectorAll('table.table tbody tr')]
-        .filter((r) => r.querySelector('td')?.textContent?.trim() === 'PCB 打样板')
-        .map((r) => r.querySelectorAll('td')[2]?.textContent?.trim())[0] === '卷'
+        .filter((r) => r.querySelector('td.name-col')?.textContent?.trim() === 'PCB 打样板')
+        .map((r) => r.querySelector('td.unit-col')?.textContent?.trim())[0] === '卷'
     )
   )
 
@@ -1977,7 +2261,7 @@ async function run(page, shot) {
   const rowButtons = (name) =>
     page.evaluate((n) => {
       const tr = [...document.querySelectorAll('table.table tbody tr')].find(
-        (r) => r.querySelector('td')?.textContent?.trim() === n
+        (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
       )
       return tr
         ? [...tr.querySelectorAll('td:last-child button')].map((b) => b.textContent.trim())
@@ -1995,7 +2279,7 @@ async function run(page, shot) {
     page.evaluate(
       ([n, l]) => {
         const tr = [...document.querySelectorAll('table.table tbody tr')].find(
-          (r) => r.querySelector('td')?.textContent?.trim() === n
+          (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
         )
         if (!tr) throw new Error('找不到行：' + n)
         const b = [...tr.querySelectorAll('td:last-child button')].find(
@@ -2390,6 +2674,179 @@ async function run(page, shot) {
     (await page.locator('.modal-overlay').count()) === 0 && (await qtyOf(QTY_TGT)) === -3,
     `overlay=${await page.locator('.modal-overlay').count()} qty=${await qtyOf(QTY_TGT)}`
   )
+
+  // ── 9e. 删除整个物品（操作列的删除按钮，需口令） ──────────
+  /*
+   * 这一节开始**改动物品集合**（删物品、后面还有导入清空），
+   * 所以必须排在所有依赖「6 种物品」的断言之后。
+   */
+  section('9e. 仓库页：删除物品（需口令）')
+
+  await switchTab(page, '仓库')
+  await page.waitForSelector('table.table')
+  await page.waitForTimeout(300)
+
+  // 挑「闲置物料 X」：它没有任何出入库记录，删它不影响别的断言关心的数据
+  const DEL_TGT = '闲置物料 X'
+  const rowsBeforeDelete = await rowCount(page)
+  await page
+    .locator('table.table tbody tr')
+    .nth(await whRowIdx(page, DEL_TGT))
+    .locator('button', { hasText: '删除' })
+    .click()
+  await page.waitForSelector('.modal-overlay')
+  await page.waitForTimeout(200)
+  check('点操作列的「删除」→ 弹出对话框', (await page.locator('.modal-overlay').count()) === 1)
+  check(
+    '对话框标题是「删除物品」（按标题语义区分共用的 .modal 类名）',
+    (await modalTitle()) === '删除物品'.replace(/\s/g, ''),
+    JSON.stringify(await modalTitle())
+  )
+  check(
+    '提示里写清了「连带删掉几条记录」——「删除物品」听起来只删一行',
+    /名下 \d+ 条出入库记录/.test(await page.locator('.modal-text').first().textContent()),
+    await page.locator('.modal-text').first().textContent()
+  )
+
+  // 口令错：一步都不许往下走
+  await page.locator('.modal input[type="password"]').fill('000000')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(300)
+  check('口令错误 → 对话框不关', (await page.locator('.modal-overlay').count()) === 1)
+  check('口令错误 → 框内给出提示', (await page.locator('.modal-error').count()) >= 1)
+  check('口令错误 → 物品还在', (await whNames(page)).includes(DEL_TGT))
+
+  // 口令对：删掉
+  await page.locator('.modal input[type="password"]').fill('771204')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(800)
+  check('口令正确 → 对话框关闭', (await page.locator('.modal-overlay').count()) === 0)
+  check('口令正确 → 物品被删除', !(await whNames(page)).includes(DEL_TGT))
+  check(
+    '物品数少 1',
+    (await rowCount(page)) === rowsBeforeDelete - 1,
+    `${rowsBeforeDelete} → ${await rowCount(page)}`
+  )
+
+  // ── 9f. 导入表格（口令 + 清空重建） ────────────────────────
+  /*
+   * 放在最靠后：导入会**清空所有数据**，之后就不该再有依赖旧数据的断言了
+   * （后面只剩「控制台无报错」和「bundle 内容」两节，它们不看数据）。
+   */
+  section('9f. 仓库页：导入表格（会清空现有数据）')
+
+  const csvPath = join(tmpdir(), `wh-import-${Date.now()}.csv`)
+  await writeFile(
+    csvPath,
+    [
+      '名称,单位,数量,备注',
+      '导入甲,个,11,第一行备注',
+      '导入乙,米,22,',
+      '导入丙,卷,-3,负库存也允许'
+    ].join('\n'),
+    'utf8'
+  )
+
+  await page.locator('.card-toolbar button', { hasText: '导入表格' }).click()
+  await page.waitForSelector('.modal-overlay')
+  await page.waitForTimeout(200)
+  check('点「导入表格」→ 先弹口令框', (await page.locator('.modal input[type="password"]').count()) === 1)
+  check(
+    '口令框里先说清了「会清空现有数据」',
+    /清空/.test(await page.locator('.modal-text').first().textContent()),
+    await page.locator('.modal-text').first().textContent()
+  )
+
+  await page.locator('.modal input[type="password"]').fill('000000')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(300)
+  check(
+    '口令错误 → 不进入导入对话框（连文件选择框都不该出现）',
+    (await page.locator('.modal input[type="file"]').count()) === 0,
+    `file=${await page.locator('.modal input[type="file"]').count()}`
+  )
+
+  await page.locator('.modal input[type="password"]').fill('771204')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(400)
+  check('口令正确 → 打开导入对话框', (await page.locator('.modal-wide').count()) === 1)
+  check(
+    '导入框里有醒目的清空警告',
+    (await page.locator('.modal-warn').count()) === 1 &&
+      /不可撤销/.test(await page.locator('.modal-warn').textContent()),
+    await page.locator('.modal-warn').textContent()
+  )
+
+  await page.locator('.modal input[type="file"]').setInputFiles(csvPath)
+  await page.waitForTimeout(600)
+  const importBody = await page.locator('.modal-body').textContent()
+  check('读到 3 行并给出预览', /3 行/.test(importBody), importBody.slice(0, 120))
+  check('预览里能看到表格内容（导入甲）', /导入甲/.test(importBody))
+
+  await page.locator('.modal .import-field input').first().fill('张三')
+  await page.locator('.modal .import-field input').nth(1).fill('李四')
+  await page.locator('.modal-actions .btn', { hasText: '确认导入' }).click()
+  await page.waitForTimeout(900)
+  check('导入后对话框自己关掉', (await page.locator('.modal-overlay').count()) === 0)
+
+  check('导入后物品数 = 表格行数（3）', (await rowCount(page)) === 3, `${await rowCount(page)}`)
+  const importedNames = await page.evaluate(() =>
+    [...document.querySelectorAll('table.table tbody tr')].map(
+      (r) => r.querySelector('td.name-col')?.textContent?.trim()
+    )
+  )
+  check(
+    '物品顺序 = 表格顺序（导入甲 / 导入乙 / 导入丙）',
+    importedNames.join('|') === '导入甲|导入乙|导入丙',
+    importedNames.join('|')
+  )
+  check('备注也导进来了', (await cellText('导入甲', 'note-cell')) === '第一行备注', String(await cellText('导入甲', 'note-cell')))
+  check('数量按表格值（含负数）', (await cellText('导入丙', 'qty-col')) === '-3', String(await cellText('导入丙', 'qty-col')))
+  check('单位按表格值', (await cellText('导入乙', 'unit-col')) === '米', String(await cellText('导入乙', 'unit-col')))
+  check(
+    '警戒值用默认值 100（表格里没有这一列）',
+    (await page.locator('table.table tbody tr').first().locator('.threshold-input').inputValue()) === '100'
+  )
+
+  // 记录页：每个物品一条导入产生的入库记录，操作人/经手人是导入时填的
+  await switchTab(page, '记录')
+  await page.waitForSelector('table.table')
+  await page.waitForTimeout(400)
+  check('记录页正好 3 条（清空后按行重建）', (await rowCount(page)) === 3, `${await rowCount(page)}`)
+
+  /** 记录页某一列的整列文本，按**表头名**定位 */
+  const recCol = (headerName) =>
+    page.evaluate((h) => {
+      const table = document.querySelector('table.table')
+      const ths = [...table.querySelectorAll('thead th')]
+      const i = ths.findIndex((th) => th.textContent.trim() === h)
+      if (i < 0) return null
+      return [...table.querySelectorAll('tbody tr')].map((r) =>
+        r.querySelectorAll('td')[i]?.textContent?.trim()
+      )
+    }, headerName)
+
+  const importedOps = await recCol('操作人')
+  const importedHdls = await recCol('经手人/领取人')
+  const importedTimes = await recCol('时间')
+  check(
+    '每条记录的操作人都是导入时填的「张三」',
+    importedOps?.every((v) => v === '张三'),
+    JSON.stringify(importedOps)
+  )
+  check(
+    '每条记录的经手人都是导入时填的「李四」',
+    importedHdls?.every((v) => v === '李四'),
+    JSON.stringify(importedHdls)
+  )
+  check(
+    '时间用的是导入时间（今天）',
+    importedTimes?.every((t) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(t ?? '')),
+    JSON.stringify(importedTimes)
+  )
+
+  await switchTab(page, '仓库')
+  await page.waitForTimeout(200)
 
   // ── 10. 控制台 ───────────────────────────────────────────
   section('10. 渲染进程控制台')

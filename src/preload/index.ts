@@ -2,10 +2,16 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type {
   DB,
+  DeleteItemResult,
   DeleteRecordResult,
+  ImportResult,
+  ImportRow,
   RenameItemResult,
+  ReorderItemsResult,
+  SetNoteResult,
   SetQuantityResult,
   SetThresholdResult,
+  SetUnitResult,
   TransactionInput,
   TransactionResult
 } from '@shared/types'
@@ -61,6 +67,34 @@ const api = {
    */
   setItemQuantity: (id: string, quantity: number, password: string): Promise<SetQuantityResult> =>
     ipcRenderer.invoke('db:setQuantity', id, quantity, password),
+
+  /** 删除整个物品及其名下所有记录（需口令，校验在数据层） */
+  deleteItem: (id: string, password: string): Promise<DeleteItemResult> =>
+    ipcRenderer.invoke('db:deleteItem', id, password),
+
+  /** 拖动改顺序。不需要口令，但它重排的是 items 数组本身 */
+  reorderItems: (orderedIds: string[]): Promise<ReorderItemsResult> =>
+    ipcRenderer.invoke('db:reorderItems', orderedIds),
+
+  /** 修改物品备注。允许传空串（= 清空备注） */
+  setItemNote: (id: string, note: string): Promise<SetNoteResult> =>
+    ipcRenderer.invoke('db:setNote', id, note),
+
+  /** 修改物品单位。空串会被数据层拒绝 */
+  setItemUnit: (id: string, unit: string): Promise<SetUnitResult> =>
+    ipcRenderer.invoke('db:setUnit', id, unit),
+
+  /**
+   * 导入表格（需口令，**会清空现有全部数据**）。
+   * `rows` 按表格行顺序传入，导入后物品顺序与之一致。
+   */
+  importTable: (
+    password: string,
+    rows: ImportRow[],
+    operator: string,
+    handler: string
+  ): Promise<ImportResult> =>
+    ipcRenderer.invoke('db:importTable', password, rows, operator, handler),
 
   /**
    * 重命名物品。撞名时会与已有物品**合并**，可用 `unit` 指定合并后使用的单位；

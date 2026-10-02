@@ -225,6 +225,17 @@ export function TransactionForm({
           readOnly={!!matchedItem}
           required={!matchedItem}
         />
+        {/*
+          已有物品的备注只**展示**、不给编辑入口。
+          备注属于物品本身（Item.note），改它应该去仓库页那一行上改 ——
+          这里塞一个输入框，就会出现「同一样东西两个地方能改」，
+          而两处的行为很难完全一致。
+        */}
+        {matchedItem?.note && (
+          <p className="tx-item-note" title="这个物品的备注，在仓库页可以修改">
+            备注：{matchedItem.note}
+          </p>
+        )}
       </div>
 
       <div className="tx-field">

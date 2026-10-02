@@ -16,6 +16,14 @@ export interface Item {
    * 加载时由数据层补齐，不需要用户手动迁移。
    */
   threshold: number
+  /**
+   * 物品备注（自由文本）。空串表示未填。
+   *
+   * v1.6.0 引入。旧数据文件没这个字段，加载时补成空串。
+   * 与 StockRecord **不同**：StockRecord 没有备注字段，
+   * 备注属于「这个物品」而不是「某一次出入库」。
+   */
+  note?: string
   createdAt: string
   updatedAt: string
 }
@@ -135,4 +143,46 @@ export type RenameItemResult =
       /** 非致命提示，例如合并后库存为负 */
       warning?: string
     }
+  | { ok: false; error: string }
+
+/**
+ * 表格导入的一行。来源是用户在导入对话框里选择的 xlsx/csv 文件，
+ * 数据层会校验每一行（名称、单位、数量必填，数量必须为有限数）。
+ */
+export interface ImportRow {
+  name: string
+  unit: string
+  quantity: number
+  note?: string
+}
+
+/** 导入表格的结果 */
+export type ImportResult =
+  | { ok: true; itemCount: number; recordCount: number }
+  | { ok: false; error: string; wrongPassword?: boolean; rowIndex?: number }
+
+/** 修改物品备注 */
+export type SetNoteResult = { ok: true; item: Item } | { ok: false; error: string }
+
+/** 修改物品单位 */
+export type SetUnitResult = { ok: true; item: Item } | { ok: false; error: string }
+
+/**
+ * 删除整个物品的结果。
+ *
+ * `itemCount` / `recordCount` 是被清掉的统计 —— 哪怕接口失败也写下来，
+ * 方便排查「我想删 1 个物品，但实际删了 8 条记录」之类的情况。
+ */
+export type DeleteItemResult =
+  | { ok: true; itemCount: number; recordCount: number }
+  | { ok: false; error: string; wrongPassword?: boolean }
+
+/**
+ * 重新排列 items 顺序的结果。
+ *
+ * 拖动改顺序是一个交互体验，不强制密码 —— 否则每拖一次都要求口令，
+ * 体验就毁了。这条路径下数据本身没被修改，只是展示顺序变了。
+ */
+export type ReorderItemsResult =
+  | { ok: true; items: Item[] }
   | { ok: false; error: string }

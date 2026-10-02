@@ -30,6 +30,11 @@ export default function App() {
     deleteRecord,
     setItemThreshold,
     setItemQuantity,
+    setItemNote,
+    setItemUnit,
+    deleteItem,
+    reorderItems,
+    importTable,
     renameItem,
     exportXlsx,
     openDataFolder
@@ -101,6 +106,11 @@ export default function App() {
             applyTransaction={applyTransaction}
             setItemThreshold={setItemThreshold}
             setItemQuantity={setItemQuantity}
+            setItemNote={setItemNote}
+            setItemUnit={setItemUnit}
+            deleteItem={deleteItem}
+            reorderItems={reorderItems}
+            importTable={importTable}
             renameItem={renameItem}
             exportXlsx={exportXlsx}
           />

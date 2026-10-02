@@ -20,10 +20,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
   DB,
+  DeleteItemResult,
+  DeleteRecordResult,
+  ImportResult,
   RenameItemResult,
+  ReorderItemsResult,
+  SetNoteResult,
   SetQuantityResult,
-  TransactionResult,
-  DeleteRecordResult
+  SetUnitResult,
+  TransactionResult
 } from '@shared/types'
 import { QUANTITY_EDIT_PASSWORD } from '@shared/utils'
 import { registerIpcHandlers } from '../src/main/ipc'
@@ -166,6 +171,20 @@ function firstRow(w: BrowserWindow): Promise<Record<string, string>> {
   )
 }
 
+/**
+ * 今天（本地时区）的 `YYYY-MM-DD`。
+ *
+ * 第 3~7 节的测试数据**必须落在当前月**：那几节要验仓库页的
+ * 「本月入库 / 本月出库」两列，而「本月」是相对今天算的。
+ * 原来这些数据写死成 `2026-09-19` —— 一进 10 月，「本月」就成了空，
+ * 两条断言必然变红，而报出来的是「本月入库 = —」，看着像统计功能坏了。
+ */
+function todayStr(): string {
+  const d = new Date()
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
 /** 把 { 表头名: 值 } 打成一行，失败信息里能看清到底取到了什么 */
 function rowText(row: Record<string, string>): string {
   const keys = Object.keys(row)
@@ -248,7 +267,7 @@ async function run(): Promise<void> {
   section('3. 经 IPC 提交入库 → 真实落盘')
   const t1 = await evalIn<TransactionResult>(
     win,
-    TX({ time: '2026-09-19T10:00', name: 'M3×8 螺丝', quantity: 100, unit: '个', operator: '张三', handler: '赵六', type: 'in' })
+    TX({ time: `${todayStr()}T10:00`, name: 'M3×8 螺丝', quantity: 100, unit: '个', operator: '张三', handler: '赵六', type: 'in' })
   )
   check('入库返回 ok', t1.ok === true, t1.ok ? '' : t1.error)
   check('库存 = 100', t1.ok && t1.item.quantity === 100, t1.ok ? `${t1.item.quantity}` : '')
@@ -269,7 +288,7 @@ async function run(): Promise<void> {
   section('4. 单位锁定经 IPC 生效')
   const t2 = await evalIn<TransactionResult>(
     win,
-    TX({ time: '2026-09-19T11:00', name: 'M3×8 螺丝', quantity: 50, unit: '箱', operator: '李四', type: 'in' })
+    TX({ time: `${todayStr()}T11:00`, name: 'M3×8 螺丝', quantity: 50, unit: '箱', operator: '李四', type: 'in' })
   )
   check('第二笔入库 ok', t2.ok === true, t2.ok ? '' : t2.error)
   check('单位被锁定为「个」而非「箱」', t2.ok && t2.item.unit === '个', t2.ok ? t2.item.unit : '')
@@ -279,7 +298,7 @@ async function run(): Promise<void> {
   section('5. 负库存只警告不阻断')
   const t3 = await evalIn<TransactionResult>(
     win,
-    TX({ time: '2026-09-19T12:00', name: 'M3×8 螺丝', quantity: 200, unit: '个', operator: '王五', handler: '孙八', type: 'out' })
+    TX({ time: `${todayStr()}T12:00`, name: 'M3×8 螺丝', quantity: 200, unit: '个', operator: '王五', handler: '孙八', type: 'out' })
   )
   check('出库 200 仍成功', t3.ok === true, t3.ok ? '' : t3.error)
   check('库存变为 -50', t3.ok && t3.item.quantity === -50, t3.ok ? `${t3.item.quantity}` : '')
@@ -295,7 +314,7 @@ async function run(): Promise<void> {
   )
   await evalIn<TransactionResult>(
     win,
-    TX({ time: '2026-09-19T13:00', name: 'M3×8 螺丝', quantity: 10, unit: '个', type: 'in' })
+    TX({ time: `${todayStr()}T13:00`, name: 'M3×8 螺丝', quantity: 10, unit: '个', type: 'in' })
   )
   await new Promise((r) => setTimeout(r, 250))
   const chgAfter = await evalIn<number>(win, 'window.__chg')
@@ -304,7 +323,7 @@ async function run(): Promise<void> {
   await evalIn<void>(win, '(() => { window.api.offChanged(window.__sub); window.__chg = 0 })()')
   await evalIn<TransactionResult>(
     win,
-    TX({ time: '2026-09-19T14:00', name: 'M3×8 螺丝', quantity: 5, unit: '个', type: 'in' })
+    TX({ time: `${todayStr()}T14:00`, name: 'M3×8 螺丝', quantity: 5, unit: '个', type: 'in' })
   )
   await new Promise((r) => setTimeout(r, 250))
   const chgAfterOff = await evalIn<number>(win, 'window.__chg')
@@ -600,6 +619,122 @@ async function run(): Promise<void> {
   win.destroy()
   win = null
   await rm(qtyDir, { recursive: true, force: true })
+
+  // ── 13c. 备注 / 单位 / 排序 / 删除物品 / 导入 经 IPC ──────────
+  /*
+   * 与 13b 同一个道理：口令与校验的防线在**数据层**。
+   * 这一节全部**绕过界面**直接 invoke —— 界面上有没有那个按钮、
+   * 拦没拦，都不该影响这里的结果。
+   */
+  section('13c. 备注 / 单位 / 排序 / 删除物品 / 导入经 IPC')
+  const v16Dir = mkdtempSync(join(tmpdir(), 'wm-v16-'))
+  initStore(v16Dir)
+  await load()
+  win = await openWindow()
+  const v16File = getDataFilePath()
+
+  const ipcSeedA = await evalIn<TransactionResult>(
+    win,
+    TX({ time: '2026-09-24T10:00', name: 'IPC甲', quantity: 10, unit: '个', type: 'in' })
+  )
+  const ipcSeedB = await evalIn<TransactionResult>(
+    win,
+    TX({ time: '2026-09-24T11:00', name: 'IPC乙', quantity: 20, unit: '米', type: 'in' })
+  )
+  check('铺好 IPC 用例的数据（2 个物品）', ipcSeedA.ok === true && ipcSeedB.ok === true)
+  if (!ipcSeedA.ok || !ipcSeedB.ok) throw new Error('IPC 用例的前置数据没造出来')
+
+  const noteR = await evalIn<SetNoteResult>(
+    win,
+    `window.api.setItemNote(${JSON.stringify(ipcSeedA.item.id)}, "IPC 备注")`
+  )
+  check('改备注经 IPC 生效', noteR.ok && noteR.item.note === 'IPC 备注', JSON.stringify(noteR))
+
+  const unitR = await evalIn<SetUnitResult>(
+    win,
+    `window.api.setItemUnit(${JSON.stringify(ipcSeedA.item.id)}, "箱")`
+  )
+  check('改单位经 IPC 生效', unitR.ok && unitR.item.unit === '箱', JSON.stringify(unitR))
+  const unitBad = await evalIn<SetUnitResult>(
+    win,
+    `window.api.setItemUnit(${JSON.stringify(ipcSeedA.item.id)}, "  ")`
+  )
+  check('空单位经 IPC 被拒（界面不拦也拦得住）', unitBad.ok === false, JSON.stringify(unitBad))
+
+  const newOrder = [ipcSeedB.item.id, ipcSeedA.item.id]
+  const orderR = await evalIn<ReorderItemsResult>(
+    win,
+    `window.api.reorderItems(${JSON.stringify(newOrder)})`
+  )
+  check('排序经 IPC 生效', orderR.ok === true, JSON.stringify(orderR).slice(0, 110))
+  check(
+    '磁盘上的顺序也变了',
+    (await readJSON(v16File)).items.map((i) => i.id).join(',') === newOrder.join(',')
+  )
+  const orderBad = await evalIn<ReorderItemsResult>(
+    win,
+    `window.api.reorderItems(${JSON.stringify([newOrder[0]])})`
+  )
+  check('数量不一致的顺序列表经 IPC 被拒', orderBad.ok === false, JSON.stringify(orderBad))
+
+  const delBad = await evalIn<DeleteItemResult>(
+    win,
+    `window.api.deleteItem(${JSON.stringify(ipcSeedA.item.id)}, "000000")`
+  )
+  check(
+    '删除物品：口令错 → 绕过界面同样被拒',
+    delBad.ok === false && delBad.wrongPassword === true,
+    JSON.stringify(delBad)
+  )
+  check('口令错 → 磁盘上物品还在', (await readJSON(v16File)).items.length === 2)
+
+  const delOk = await evalIn<DeleteItemResult>(
+    win,
+    `window.api.deleteItem(${JSON.stringify(ipcSeedA.item.id)}, ${JSON.stringify(QUANTITY_EDIT_PASSWORD)})`
+  )
+  check('删除物品：口令对 → 成功', delOk.ok === true, JSON.stringify(delOk))
+  const delDisk = await readJSON(v16File)
+  check('磁盘上物品少 1', delDisk.items.length === 1, `${delDisk.items.length}`)
+  check(
+    '连带删掉它名下的记录（不留孤儿）',
+    delDisk.records.every((r) => r.itemId !== ipcSeedA.item.id),
+    delDisk.records.map((r) => r.itemId).join(',')
+  )
+
+  const impBad = await evalIn<ImportResult>(
+    win,
+    'window.api.importTable("000000", [{name:"X",unit:"个",quantity:1}], "", "")'
+  )
+  check(
+    '导入：口令错 → 拒绝',
+    impBad.ok === false && impBad.wrongPassword === true,
+    JSON.stringify(impBad)
+  )
+  check('导入被拒 → 旧数据原封不动', (await readJSON(v16File)).items.length === 1)
+
+  const impOk = await evalIn<ImportResult>(
+    win,
+    `window.api.importTable(${JSON.stringify(QUANTITY_EDIT_PASSWORD)}, ` +
+      '[{name:"导入甲",unit:"个",quantity:11,note:"n1"},{name:"导入乙",unit:"米",quantity:22}], ' +
+      '"张三", "李四")'
+  )
+  check('导入：口令对 → 成功', impOk.ok === true, JSON.stringify(impOk))
+  const impDisk = await readJSON(v16File)
+  check('磁盘上物品数 = 表格行数', impDisk.items.length === 2, `${impDisk.items.length}`)
+  check(
+    '磁盘上物品顺序 = 表格顺序',
+    impDisk.items.map((i) => i.name).join('|') === '导入甲|导入乙',
+    impDisk.items.map((i) => i.name).join('|')
+  )
+  check(
+    '磁盘上的记录带上了操作人 / 经手人',
+    impDisk.records.every((r) => r.operator === '张三' && r.handler === '李四'),
+    JSON.stringify(impDisk.records.map((r) => [r.operator, r.handler]))
+  )
+
+  win.destroy()
+  win = null
+  await rm(v16Dir, { recursive: true, force: true })
 
   // ── 14. 控制台 ───────────────────────────────────────────────
   section('14. 渲染进程控制台')

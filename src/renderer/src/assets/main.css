@@ -1241,3 +1241,229 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ===== v1.6.0：仓库页表头 / 搜索置顶 ======================
+ *
+ * 做法是让**表格自己滚动**，而不是让整个页面滚。
+ * 不这么做的话，滚动的是 .content，表头会跟着一起滚走 ——
+ * 用户下拉时看不到「这一列是什么」，容易看成列错位。
+ *
+ * 卡片因此要变成「撑满剩余高度 + 内部纵向排列」：
+ * 头部固定高度、表格区吃掉剩下的空间并在内部滚动。
+ */
+.card-fill {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.card-fill > .card-header {
+  flex: none;
+}
+
+.table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/*
+ * 表头吸附在滚动容器顶部。
+ *
+ * 两条不显然的坑：
+ *  1. 必须有**背景色**。th 默认透明，吸附时下面的行会从它背后透出来。
+ *  2. `border-collapse: collapse` 下，边框属于表格而不是单元格，
+ *     滚动时那条 border-bottom 会被留在原地（视觉上断成一截）。
+ *     所以用 inset 阴影画这条线 —— 阴影跟着元素走。
+ */
+.table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding-top: 8px;
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+/* ===== 拖动排序 ========================================== */
+
+.drag-cell {
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+}
+
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 4px 0;
+  cursor: grab;
+  color: var(--text-faint);
+  touch-action: none;
+}
+
+.drag-handle:hover {
+  color: var(--text-muted);
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* 三行横线：上下两条用边框，中间一条用伪元素 ——
+   不用渐变，也不用图标字体，缩放时线宽不会变形 */
+.drag-bars {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 10px;
+  border-top: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+}
+
+.drag-bars::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  border-top: 1px solid currentColor;
+  transform: translateY(-50%);
+}
+
+/* 「只看低于警戒值」时禁止拖动：此时屏幕上不是全量，
+   拖出来的顺序对整体来说是未定义的（见 WarehousePage 的注释） */
+.drag-handle[draggable='false'] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/*
+ * 放置目标的提示：整行浅蓝 + 顶部一条蓝线（表示「会插到这里」）。
+ *
+ * 这段必须排在 .row-low / .row-hit **之后**：选择器权重相同，
+ * 靠先后顺序决定谁能压过谁 —— 拖动提示是临时状态，理应最优先。
+ */
+.table tbody tr.row-drop td {
+  background: var(--hit-row);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* ===== 可编辑文本单元格（备注 / 单位） ==================== */
+
+.editable-text {
+  cursor: text;
+  border-bottom: 1px dashed transparent;
+}
+
+.editable-text:hover {
+  border-bottom-color: var(--border);
+}
+
+/* 空内容显示成「—」，颜色压淡：空白单元格看着像「加载失败了」 */
+.editable-empty {
+  color: var(--text-faint);
+}
+
+/*
+ * 备注可能很长，超出列宽就截断 —— 但 whole-cell 的 title 还在，
+ * 鼠标移上去能看到完整内容。
+ * 只给备注列加：单位列本来就很短，截断反而会让「个」变成「…」
+ */
+.note-cell .editable-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 表头里塞一个复选框时用来对齐（警戒值 + 小方框） */
+.th-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ===== 导入表格对话框 ==================================== */
+
+.modal-wide {
+  max-width: 640px;
+}
+
+/* 强警告：这是一个会清空数据的操作，警告必须是「块」而不是一行小字 */
+.modal-warn {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.import-file input[type='file'] {
+  font: inherit;
+  font-size: 13px;
+  max-width: 100%;
+}
+
+.import-preview {
+  max-height: 220px;
+  overflow: auto;
+  margin: 10px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+/* 预览表比主表紧凑一号：它是「看一眼有没有读错」用的，不需要那么宽松 */
+.table-compact {
+  font-size: 12.5px;
+}
+
+.table-compact th,
+.table-compact td {
+  padding: 6px 10px;
+}
+
+.import-people {
+  margin-top: 12px;
+}
+
+.import-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.import-field input {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+
+.import-field input:focus {
+  border-color: var(--accent);
+}
+
+/*
+ * 操作页里「已有物品的备注」只读一行。
+ * 用 margin 负值贴到单位输入框下面：它是对上面那一格的补充说明，
+ * 不是一个独立的字段，留出正常间距会让人以为是又一个要填的输入框。
+ */
+.tx-item-note {
+  margin: -2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}

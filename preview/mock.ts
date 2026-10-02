@@ -7,11 +7,17 @@
  */
 import type {
   DB,
+  DeleteItemResult,
   DeleteRecordResult,
+  ImportResult,
+  ImportRow,
   Item,
   RenameItemResult,
+  ReorderItemsResult,
+  SetNoteResult,
   SetQuantityResult,
   SetThresholdResult,
+  SetUnitResult,
   StockRecord,
   TransactionInput,
   TransactionResult
@@ -34,11 +40,12 @@ function seed(): DB {
   const items: Item[] = [
     // 刻意让几种状态都出现：高于警戒值、低于警戒值、负数、正好为 0。
     // 注意别在这里加「排针」—— 界面自检的「新建物品」用例要靠它不存在才能跑通。
-    { id: 'i1', name: 'M3×8 螺丝', unit: '个', quantity: 245, threshold: 100, createdAt: NOW, updatedAt: NOW },
-    { id: 'i2', name: '贴片电阻 10kΩ', unit: '个', quantity: 80, threshold: 100, createdAt: NOW, updatedAt: NOW },
-    { id: 'i3', name: '铜线 1.5mm²', unit: '米', quantity: -15, threshold: 50, createdAt: NOW, updatedAt: NOW },
-    { id: 'i4', name: '焊锡丝 0.8mm', unit: '卷', quantity: 12, threshold: 10, createdAt: NOW, updatedAt: NOW },
-    { id: 'i5', name: 'PCB 打样板', unit: '块', quantity: 0, threshold: 5, createdAt: NOW, updatedAt: NOW },
+  // note 刻意有的填、有的不填 —— 界面要能看出「空备注」不是坏了
+  { id: 'i1', name: 'M3×8 螺丝', unit: '个', quantity: 245, threshold: 100, note: '常用规格，注意防潮', createdAt: NOW, updatedAt: NOW },
+  { id: 'i2', name: '贴片电阻 10kΩ', unit: '个', quantity: 80, threshold: 100, note: '', createdAt: NOW, updatedAt: NOW },
+  { id: 'i3', name: '铜线 1.5mm²', unit: '米', quantity: -15, threshold: 50, note: '负数是历史遗留，需盘点', createdAt: NOW, updatedAt: NOW },
+  { id: 'i4', name: '焊锡丝 0.8mm', unit: '卷', quantity: 12, threshold: 10, note: '', createdAt: NOW, updatedAt: NOW },
+  { id: 'i5', name: 'PCB 打样板', unit: '块', quantity: 0, threshold: 5, note: '打样回来的余料', createdAt: NOW, updatedAt: NOW },
     // 窗口内零出入库：报表页要显示「近 N 个月无出入库」而不是一个空刻度。
     // 库存刻意设为**高于**警戒值 —— 让「零出入库」和「低于警戒值」两个状态保持正交，
     // 否则它会连带扰动所有跟低库存有关的计数断言，排查时容易误判。
@@ -313,6 +320,177 @@ function setItemQuantity(
 }
 
 /**
+ * 修改物品备注。语义与主进程 `setItemNote` 一致：不写流水、允许空串。
+ */
+function setItemNote(id: string, rawNote: unknown): SetNoteResult {
+  const item = db.items.find((i) => i.id === id)
+  if (!item) return { ok: false, error: '物品不存在，可能已被删除' }
+
+  const note = typeof rawNote === 'string' ? rawNote : String(rawNote ?? '')
+  const next = clone()
+  const target = next.items.find((i) => i.id === id) as Item
+  if ((target.note ?? '') === note) return { ok: true, item: { ...target } }
+
+  target.note = note
+  target.updatedAt = new Date().toISOString()
+  db = next
+  notify()
+  return { ok: true, item: { ...target } }
+}
+
+/** 修改物品单位。语义与主进程 `setItemUnit` 一致：不写流水、空串被拒 */
+function setItemUnit(id: string, rawUnit: unknown): SetUnitResult {
+  const unit = typeof rawUnit === 'string' ? rawUnit.trim() : String(rawUnit ?? '').trim()
+  if (!unit) return { ok: false, error: '单位不能为空' }
+
+  const item = db.items.find((i) => i.id === id)
+  if (!item) return { ok: false, error: '物品不存在，可能已被删除' }
+
+  const next = clone()
+  const target = next.items.find((i) => i.id === id) as Item
+  if (target.unit === unit) return { ok: true, item: { ...target } }
+
+  target.unit = unit
+  target.updatedAt = new Date().toISOString()
+  db = next
+  notify()
+  return { ok: true, item: { ...target } }
+}
+
+/** 删除整个物品及其名下所有记录。语义与主进程 `deleteItem` 一致（需口令） */
+function deleteItem(id: string, password: unknown): DeleteItemResult {
+  if (!matchesQuantityPassword(password)) {
+    return { ok: false, error: '口令不正确', wrongPassword: true }
+  }
+  if (!db.items.some((i) => i.id === id)) {
+    return { ok: false, error: '物品不存在，可能已被删除' }
+  }
+
+  const recordCount = db.records.filter((r) => r.itemId === id).length
+  const next = clone()
+  next.items = next.items.filter((i) => i.id !== id)
+  next.records = next.records.filter((r) => r.itemId !== id)
+  db = next
+  notify()
+  return { ok: true, itemCount: 1, recordCount }
+}
+
+/** 拖动改顺序。语义与主进程 `reorderItems` 一致（不需口令，但校验数量与重复） */
+function reorderItems(orderedIds: string[]): ReorderItemsResult {
+  if (!Array.isArray(orderedIds)) return { ok: false, error: '顺序列表格式不对' }
+  if (orderedIds.length !== db.items.length) {
+    return {
+      ok: false,
+      error:
+        `顺序列表与物品数不一致（${orderedIds.length} vs ${db.items.length}），` +
+        '刚有物品增删，请刷新后重试'
+    }
+  }
+
+  const byId = new Map(db.items.map((i) => [i.id, i]))
+  const seen = new Set<string>()
+  const reordered: Item[] = []
+  for (const id of orderedIds) {
+    if (seen.has(id)) return { ok: false, error: '顺序列表里有重复物品' }
+    const item = byId.get(id)
+    if (!item) return { ok: false, error: '顺序列表里有不存在的物品，请刷新后重试' }
+    seen.add(id)
+    reordered.push(item)
+  }
+
+  const unchanged = reordered.every((item, i) => db.items[i]?.id === item.id)
+  if (unchanged) return { ok: true, items: db.items.map((i) => ({ ...i })) }
+
+  const next = clone()
+  next.items = reordered
+  db = next
+  notify()
+  return { ok: true, items: reordered.map((i) => ({ ...i })) }
+}
+
+/**
+ * 导入表格（需口令，**会清空现有全部数据**）。
+ * 语义与主进程 `importTable` 一致：先整表校验，再整表替换。
+ */
+function importTable(
+  password: unknown,
+  rows: ImportRow[],
+  operator: unknown,
+  handler: unknown
+): ImportResult {
+  if (!matchesQuantityPassword(password)) {
+    return { ok: false, error: '口令不正确', wrongPassword: true }
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { ok: false, error: '表格里没有任何数据行' }
+  }
+
+  const prepared: { name: string; unit: string; quantity: number; note: string }[] = []
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] as ImportRow | undefined
+
+    const name = normalizeName(typeof row?.name === 'string' ? row.name : String(row?.name ?? ''))
+    if (!name) return { ok: false, error: `第 ${i + 1} 行：名称为空`, rowIndex: i }
+
+    const unit = typeof row?.unit === 'string' ? row.unit.trim() : String(row?.unit ?? '').trim()
+    if (!unit) return { ok: false, error: `第 ${i + 1} 行：单位为空`, rowIndex: i }
+
+    // 同主进程：声明成 unknown，按「任意输入」来挡（表格解析出来的可能是字符串）
+    const rawQty: unknown = row?.quantity
+    if (rawQty === null || rawQty === undefined) {
+      return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
+    }
+    if (typeof rawQty === 'string' && rawQty.trim() === '') {
+      return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
+    }
+    const quantity = Number(rawQty)
+    if (!Number.isFinite(quantity)) {
+      return { ok: false, error: `第 ${i + 1} 行：数量不是数字`, rowIndex: i }
+    }
+
+    const note = typeof row?.note === 'string' ? row.note : String(row?.note ?? '')
+    prepared.push({ name, unit, quantity: roundQuantity(quantity), note })
+  }
+
+  const now = new Date().toISOString()
+  const time = toLocalDateTime()
+  const operatorText = typeof operator === 'string' ? operator.trim() : String(operator ?? '')
+  const handlerText = typeof handler === 'string' ? handler.trim() : String(handler ?? '')
+
+  const nextItems: Item[] = []
+  const nextRecords: StockRecord[] = []
+  for (const row of prepared) {
+    const item: Item = {
+      id: nid('i'),
+      name: row.name,
+      unit: row.unit,
+      quantity: row.quantity,
+      threshold: DEFAULT_THRESHOLD,
+      note: row.note,
+      createdAt: now,
+      updatedAt: now
+    }
+    nextItems.push(item)
+    nextRecords.push({
+      id: nid('r'),
+      itemId: item.id,
+      time,
+      name: item.name,
+      unit: item.unit,
+      quantity: row.quantity,
+      type: 'in',
+      operator: operatorText,
+      handler: handlerText,
+      createdAt: now
+    })
+  }
+
+  db = { version: 1, items: nextItems, records: nextRecords }
+  notify()
+  return { ok: true, itemCount: nextItems.length, recordCount: nextRecords.length }
+}
+
+/**
  * 重命名物品。语义与主进程 store 的 `renameItem` 保持一致：
  * 单纯改名时同步历史记录的 name 快照；撞名时合并（搬记录、累加数量、删源物品）。
  *
@@ -409,6 +587,18 @@ const api = {
   ): Promise<SetQuantityResult> => setItemQuantity(id, quantity, password),
   renameItem: async (id: string, name: string, unit?: string): Promise<RenameItemResult> =>
     renameItem(id, name, unit),
+  deleteItem: async (id: string, password: string): Promise<DeleteItemResult> =>
+    deleteItem(id, password),
+  reorderItems: async (orderedIds: string[]): Promise<ReorderItemsResult> =>
+    reorderItems(orderedIds),
+  setItemNote: async (id: string, note: string): Promise<SetNoteResult> => setItemNote(id, note),
+  setItemUnit: async (id: string, unit: string): Promise<SetUnitResult> => setItemUnit(id, unit),
+  importTable: async (
+    password: string,
+    rows: ImportRow[],
+    operator: string,
+    handler: string
+  ): Promise<ImportResult> => importTable(password, rows, operator, handler),
   exportXlsx: async (): Promise<{ ok: boolean; error?: string }> => ({
     ok: false,
     error: '演示模式不会真的写出文件；真实应用中这里会弹出保存对话框'

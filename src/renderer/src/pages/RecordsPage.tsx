@@ -97,6 +97,15 @@ export function RecordsPage({
         名称: r.name,
         数量: r.quantity,
         单位: r.unit,
+        /*
+         * 备注取自**物品当前**的值，不是这条记录的历史快照。
+         *
+         * 这是刻意的：备注属于「这个物品」（Item.note），不属于某一次出入库，
+         * StockRecord 根本没有备注字段。所以记录页这一列会**跟着物品变** ——
+         * 你今天改了备注，去年的记录旁边显示的也是新的。
+         * 想看「当时的状态」请看出入库记录本身，别指望备注。
+         */
+        备注: itemById.get(r.itemId)?.note || '',
         操作人: r.operator || '—',
         [HANDLER_COLUMN]: r.handler || '—',
         类型: r.type === 'in' ? '入库' : '出库'
@@ -215,6 +224,8 @@ export function RecordsPage({
               <th title="双击或右键名称可以改名">名称</th>
               <th className="num">数量</th>
               <th>单位</th>
+              {/* 备注是**物品**的属性（记录本身没有备注字段），见 handleExport 里的说明 */}
+              <th title="这个物品当前的备注（不是本条记录的历史快照）">备注</th>
               <th>操作人</th>
               <th>{HANDLER_COLUMN}</th>
               <th>类型</th>
@@ -244,6 +255,22 @@ export function RecordsPage({
                 </td>
                 <td className="num">{formatQuantity(record.quantity)}</td>
                 <td>{record.unit}</td>
+                <td className="note-cell">
+                  {/*
+                    同样是**物品当前**的备注。物品已被删除（数据异常）时显示「—」，
+                    不给编辑入口 —— 记录页改的是物品，物品都没了就没得改。
+                  */}
+                  <span
+                    className={
+                      itemById.get(record.itemId)?.note
+                        ? 'editable-text'
+                        : 'editable-text editable-empty'
+                    }
+                    style={{ cursor: 'default' }}
+                  >
+                    {itemById.get(record.itemId)?.note || '—'}
+                  </span>
+                </td>
                 <td
                   className="mono"
                   style={{ color: record.operator ? undefined : 'var(--text-faint)' }}

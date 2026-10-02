@@ -10,7 +10,19 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getDataFilePath, getLoadReport, getSnapshot, initStore, load } from '../src/main/store/db'
-import { applyTransaction, deleteRecord, renameItem, setItemQuantity, setItemThreshold } from '../src/main/store/transactions'
+import type { ImportRow } from '../src/shared/types'
+import {
+  applyTransaction,
+  deleteItem,
+  deleteRecord,
+  importTable,
+  renameItem,
+  reorderItems,
+  setItemNote,
+  setItemQuantity,
+  setItemThreshold,
+  setItemUnit
+} from '../src/main/store/transactions'
 import {
   DEFAULT_THRESHOLD,
   HANDLER_COLUMN,
@@ -851,6 +863,190 @@ async function main(): Promise<void> {
     '重新加载后强行改过的数量仍在（12.5）',
     getSnapshot().items.find((i) => i.id === qtyItem.id)?.quantity === 12.5,
     `${getSnapshot().items.find((i) => i.id === qtyItem.id)?.quantity}`
+  )
+
+  // ── 25. v1.6.0 新增：备注 / 单位 / 删除物品 / 排序 / 导入 ──
+  section('25. 备注 / 单位 / 删除物品 / 排序 / 导入')
+  initStore(dir)
+  await load()
+
+  const v16 = getSnapshot().items[0]
+  if (!v16) throw new Error('v1.6.0 用例的前置物品没找到')
+  const recordsBeforeV16 = getSnapshot().records.length
+
+  // ── 25a. 备注 ────────────────────────────────────────────
+  const noteSet = await setItemNote(v16.id, '这是个备注')
+  check('改备注成功', noteSet.ok && noteSet.item.note === '这是个备注', JSON.stringify(noteSet))
+  check('改备注不写流水', getSnapshot().records.length === recordsBeforeV16)
+  check(
+    '备注已落盘',
+    JSON.parse(await readFile(getDataFilePath(), 'utf8')).items.find(
+      (i: { id: string }) => i.id === v16.id
+    )?.note === '这是个备注'
+  )
+  // 与数量相反：数量留空是错误，备注留空是「把备注去掉」
+  const noteClear = await setItemNote(v16.id, '')
+  check('备注允许清空', noteClear.ok && noteClear.item.note === '', JSON.stringify(noteClear))
+  const noteGhost = await setItemNote('不存在的-id', 'x')
+  check('物品不存在时改备注返回错误', noteGhost.ok === false, JSON.stringify(noteGhost))
+
+  // ── 25b. 单位 ────────────────────────────────────────────
+  const unitBefore = v16.unit
+  const unitSet = await setItemUnit(v16.id, '箱')
+  check('改单位成功', unitSet.ok && unitSet.item.unit === '箱', JSON.stringify(unitSet))
+  check('改单位不写流水', getSnapshot().records.length === recordsBeforeV16)
+  for (const [label, bad] of [
+    ['空串', ''],
+    ['纯空白', '   '],
+    ['undefined', undefined],
+    ['null', null]
+  ] as const) {
+    const r = await setItemUnit(v16.id, bad as unknown as string)
+    check(`单位「${label}」被拒绝（空单位会让整列空白）`, r.ok === false, JSON.stringify(r))
+  }
+  check('单位被拒后仍是「箱」', getSnapshot().items.find((i) => i.id === v16.id)?.unit === '箱')
+  await setItemUnit(v16.id, unitBefore)
+
+  // ── 25c. 删除物品（需口令） ──────────────────────────────
+  const delSeed = await applyTransaction({
+    time: '2026-09-24T10:00',
+    name: '待删物品',
+    quantity: 5,
+    unit: '个',
+    type: 'in'
+  })
+  if (!delSeed.ok) throw new Error('删除用例的前置数据没造出来')
+  const delId = delSeed.item.id
+  const itemsBeforeDelete = getSnapshot().items.length
+  const recordsBeforeDelete = getSnapshot().records.length
+
+  const delBad = await deleteItem(delId, '000000')
+  check(
+    '口令错 → 拒绝删除',
+    delBad.ok === false && delBad.wrongPassword === true,
+    JSON.stringify(delBad)
+  )
+  check('口令错 → 物品还在', getSnapshot().items.some((i) => i.id === delId))
+  check('口令错 → 记录一条没少', getSnapshot().records.length === recordsBeforeDelete)
+
+  const delOk = await deleteItem(delId, QUANTITY_EDIT_PASSWORD)
+  check('口令对 → 删除成功', delOk.ok === true, JSON.stringify(delOk))
+  if (delOk.ok) {
+    check('删掉 1 个物品', delOk.itemCount === 1)
+    check('连带删掉它名下的记录', delOk.recordCount === 1, `${delOk.recordCount}`)
+  }
+  check('物品数少 1', getSnapshot().items.length === itemsBeforeDelete - 1)
+  check('记录数少 1（不留孤儿记录）', getSnapshot().records.length === recordsBeforeDelete - 1)
+  check(
+    '磁盘上也没有孤儿记录',
+    JSON.parse(await readFile(getDataFilePath(), 'utf8')).records.every(
+      (r: { itemId: string }) => r.itemId !== delId
+    )
+  )
+  const delGhost = await deleteItem('不存在的-id', QUANTITY_EDIT_PASSWORD)
+  check('物品不存在时删除返回错误', delGhost.ok === false, JSON.stringify(delGhost))
+
+  // ── 25d. 拖动排序 ────────────────────────────────────────
+  const orderBefore = getSnapshot().items.map((i) => i.id)
+  check('至少有 3 个物品可排序', orderBefore.length >= 3, `${orderBefore.length}`)
+  const reversed = [...orderBefore].reverse()
+  const reorderOk = await reorderItems(reversed)
+  check('重排成功', reorderOk.ok === true, JSON.stringify(reorderOk).slice(0, 120))
+  check('顺序真的反过来了', getSnapshot().items.map((i) => i.id).join(',') === reversed.join(','))
+  check(
+    '顺序已落盘',
+    JSON.parse(await readFile(getDataFilePath(), 'utf8')).items.map(
+      (i: { id: string }) => i.id
+    ).join(',') === reversed.join(',')
+  )
+
+  const reorderShort = await reorderItems(reversed.slice(0, -1))
+  check(
+    '数量不一致 → 拒绝（按过期列表重排会悄悄丢物品）',
+    reorderShort.ok === false,
+    JSON.stringify(reorderShort)
+  )
+  const reorderDup = await reorderItems([reversed[0], ...reversed.slice(0, -1)])
+  check('有重复 id → 拒绝', reorderDup.ok === false, JSON.stringify(reorderDup))
+  const reorderGhost = await reorderItems([...reversed.slice(0, -1), '不存在的-id'])
+  check('有不存在的 id → 拒绝', reorderGhost.ok === false, JSON.stringify(reorderGhost))
+  check('被拒后顺序没变', getSnapshot().items.map((i) => i.id).join(',') === reversed.join(','))
+
+  // ── 25e. 导入表格（会清空现有数据） ──────────────────────
+  const importRows: ImportRow[] = [
+    { name: '导入甲', unit: '个', quantity: 11, note: '甲备注' },
+    { name: '导入乙', unit: '米', quantity: 22, note: '' },
+    { name: '导入丙', unit: '卷', quantity: -3, note: '' }
+  ]
+  const impBad = await importTable('000000', importRows, '张三', '李四')
+  check(
+    '口令错 → 拒绝导入',
+    impBad.ok === false && impBad.wrongPassword === true,
+    JSON.stringify(impBad)
+  )
+  check('口令错 → 旧数据原封不动', getSnapshot().items.length === itemsBeforeDelete - 1)
+
+  const impBadRow = await importTable(
+    QUANTITY_EDIT_PASSWORD,
+    [
+      { name: '好行', unit: '个', quantity: 1 },
+      { name: '', unit: '个', quantity: 2 }
+    ],
+    '',
+    ''
+  )
+  check('有非法行 → 整表拒绝', impBadRow.ok === false, JSON.stringify(impBadRow))
+  check(
+    '整表被拒时旧数据仍在（不会「导入到一半、旧数据又没了」）',
+    getSnapshot().items.length === itemsBeforeDelete - 1,
+    `${getSnapshot().items.length}`
+  )
+  const impEmpty = await importTable(QUANTITY_EDIT_PASSWORD, [], '', '')
+  check('空表格 → 拒绝（否则等于一键清空）', impEmpty.ok === false, JSON.stringify(impEmpty))
+
+  const impOk = await importTable(QUANTITY_EDIT_PASSWORD, importRows, '张三', '李四')
+  check('导入成功', impOk.ok === true, JSON.stringify(impOk))
+  if (impOk.ok) {
+    check('物品数 = 表格行数 3', impOk.itemCount === 3, `${impOk.itemCount}`)
+    check('记录数 = 3（每行一条）', impOk.recordCount === 3, `${impOk.recordCount}`)
+  }
+
+  const afterImp = getSnapshot()
+  check(
+    '物品顺序 = 表格顺序',
+    afterImp.items.map((i) => i.name).join('|') === '导入甲|导入乙|导入丙',
+    afterImp.items.map((i) => i.name).join('|')
+  )
+  check('备注导进来了', afterImp.items[0].note === '甲备注', String(afterImp.items[0].note))
+  check('警戒值一律用默认值', afterImp.items.every((i) => i.threshold === DEFAULT_THRESHOLD))
+  check('数量按表格值（含负数）', afterImp.items[2].quantity === -3, `${afterImp.items[2].quantity}`)
+  check('旧物品被清空（只剩这 3 个）', afterImp.items.length === 3)
+  check('旧记录被清空（只剩这 3 条）', afterImp.records.length === 3)
+  check('记录的操作人 = 导入时填的', afterImp.records.every((r) => r.operator === '张三'))
+  check('记录的经手人 = 导入时填的', afterImp.records.every((r) => r.handler === '李四'))
+  check(
+    '记录类型是 in（StockRecord.type 只有 in/out 两种可用）',
+    afterImp.records.every((r) => r.type === 'in')
+  )
+  check(
+    '所有记录共用同一个导入时间',
+    new Set(afterImp.records.map((r) => r.time)).size === 1,
+    JSON.stringify(afterImp.records.map((r) => r.time))
+  )
+  check(
+    '记录数量与对应物品的数量一致',
+    afterImp.records.every(
+      (r) => afterImp.items.find((i) => i.id === r.itemId)?.quantity === r.quantity
+    )
+  )
+
+  // 重载：导入的结果要真的落盘
+  initStore(dir)
+  await load()
+  check(
+    '重载后导入的数据仍在',
+    getSnapshot().items.map((i) => i.name).join('|') === '导入甲|导入乙|导入丙',
+    getSnapshot().items.map((i) => i.name).join('|')
   )
 
   await rm(dir, { recursive: true, force: true })

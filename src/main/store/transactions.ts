@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import type {
+  DeleteItemResult,
   DeleteRecordResult,
+  ImportResult,
+  ImportRow,
   Item,
   RenameItemResult,
+  ReorderItemsResult,
+  SetNoteResult,
   SetQuantityResult,
   SetThresholdResult,
+  SetUnitResult,
   StockRecord,
   TransactionInput,
   TransactionResult
@@ -259,6 +265,284 @@ export function setItemQuantity(
     }
 
     return { ok: true, item: { ...item } }
+  })
+}
+
+/**
+ * 修改物品备注。
+ *
+ * 与 setItemThreshold / setItemQuantity 一样**刻意不写流水**：
+ * 备注是「这个物品」的附加说明，不是一次库存变动，
+ * 记进出库记录会让「本月入库/出库」的统计和撤销逻辑全部失准。
+ *
+ * **允许设成空串**（用户清空备注框是明确的意图） —— 这一点与数量相反：
+ * 数量留空是错误（见 setItemQuantity 第 3 条），备注留空是「把备注去掉」。
+ */
+export function setItemNote(id: string, rawNote: unknown): Promise<SetNoteResult> {
+  return enqueue(async () => {
+    const current = await load()
+    const target = current.items.find((i) => i.id === id)
+    if (!target) return { ok: false, error: '物品不存在，可能已被删除' }
+
+    const note = typeof rawNote === 'string' ? rawNote : String(rawNote ?? '')
+
+    const next = cloneDB(current)
+    const item = next.items.find((i) => i.id === id) as Item
+
+    // 没变就什么都不做：避免每次失焦都触发一次写盘 + 全窗口广播
+    if ((item.note ?? '') === note) return { ok: true, item: { ...item } }
+
+    item.note = note
+    item.updatedAt = new Date().toISOString()
+
+    try {
+      await commit(next)
+    } catch (err) {
+      return { ok: false, error: `保存失败：${String(err)}` }
+    }
+
+    return { ok: true, item: { ...item } }
+  })
+}
+
+/**
+ * 修改物品单位。
+ *
+ * 这是**唯一**能改单位的正当入口 —— 出入库时单位由数据层锁定
+ * （见 applyTransaction），改名撞名的合并路径则由调用方指定单位。
+ *
+ * 刻意**不写流水**（理由同 setItemNote / setItemThreshold）。
+ * **单位不允许为空**：清空输入框后的空串是「取消这次修改」的信号，
+ * 静默写进空串会让仓库页的单位列整列空白、且无法从记录里恢复。
+ */
+export function setItemUnit(id: string, rawUnit: unknown): Promise<SetUnitResult> {
+  return enqueue(async () => {
+    const unit = typeof rawUnit === 'string' ? rawUnit.trim() : String(rawUnit ?? '').trim()
+    if (!unit) return { ok: false, error: '单位不能为空' }
+
+    const current = await load()
+    const target = current.items.find((i) => i.id === id)
+    if (!target) return { ok: false, error: '物品不存在，可能已被删除' }
+
+    const next = cloneDB(current)
+    const item = next.items.find((i) => i.id === id) as Item
+
+    if (item.unit === unit) return { ok: true, item: { ...item } }
+
+    item.unit = unit
+    item.updatedAt = new Date().toISOString()
+
+    try {
+      await commit(next)
+    } catch (err) {
+      return { ok: false, error: `保存失败：${String(err)}` }
+    }
+
+    return { ok: true, item: { ...item } }
+  })
+}
+
+/**
+ * 删除整个物品（需口令）。
+ *
+ * 与 deleteRecord 的区别必须讲清楚，两者名字都带「删除」但语义完全不同：
+ *  - `deleteRecord` 是**撤销一条记录**：只删那一笔，并反向冲销它对库存的影响；
+ *  - `deleteItem` 是**删掉这个物品本身**，连它名下**所有**历史记录一起清掉。
+ * 后者不可恢复（不像撤销记录还能靠反向冲销找补回来），所以必须过口令。
+ */
+export function deleteItem(id: string, password: unknown): Promise<DeleteItemResult> {
+  return enqueue(async () => {
+    // 口令规则与界面共用同一个函数（见 matchesQuantityPassword 的注释）
+    if (!matchesQuantityPassword(password)) {
+      return { ok: false, error: '口令不正确', wrongPassword: true }
+    }
+
+    const current = await load()
+    if (!current.items.some((i) => i.id === id)) {
+      return { ok: false, error: '物品不存在，可能已被删除' }
+    }
+
+    // 先算好要清掉多少条，写盘失败时也还知道「原本要删多少」
+    const recordCount = current.records.filter((r) => r.itemId === id).length
+
+    const next = cloneDB(current)
+    next.items = next.items.filter((i) => i.id !== id)
+    next.records = next.records.filter((r) => r.itemId !== id)
+
+    try {
+      await commit(next)
+    } catch (err) {
+      return { ok: false, error: `保存失败：${String(err)}` }
+    }
+
+    return { ok: true, itemCount: 1, recordCount }
+  })
+}
+
+/**
+ * 重新排列物品顺序（拖动改顺序用）。
+ *
+ * 刻意**不需要口令**：拖动是高频微调，每拖一次都要求输口令就把体验毁了。
+ * 而且这条路径下**任何数据值都没变**，只是数组顺序变了 ——
+ * 最坏情况也只是「顺序不是你想要的」，重新拖回来就行，
+ * 不像删物品那样不可逆。
+ *
+ * 校验两条，缺一不可：
+ *  1. **数量必须完全一致**。多一个少一个都说明调用方手里的快照已经过期
+ *     （比如另一个窗口刚删了一个物品），此时按过期列表重排会**悄悄丢物品** ——
+ *     重排后的数组里根本没有那个 id，写盘后它就消失了；
+ *  2. **每个 id 都必须存在且不重复**。
+ */
+export function reorderItems(orderedIds: string[]): Promise<ReorderItemsResult> {
+  return enqueue(async () => {
+    if (!Array.isArray(orderedIds)) return { ok: false, error: '顺序列表格式不对' }
+
+    const current = await load()
+    if (orderedIds.length !== current.items.length) {
+      return {
+        ok: false,
+        error:
+          `顺序列表与物品数不一致（${orderedIds.length} vs ${current.items.length}），` +
+          '刚有物品增删，请刷新后重试'
+      }
+    }
+
+    const byId = new Map(current.items.map((i) => [i.id, i]))
+    const seen = new Set<string>()
+    const reordered: Item[] = []
+    for (const id of orderedIds) {
+      if (seen.has(id)) return { ok: false, error: '顺序列表里有重复物品' }
+      const item = byId.get(id)
+      if (!item) return { ok: false, error: '顺序列表里有不存在的物品，请刷新后重试' }
+      seen.add(id)
+      reordered.push(item)
+    }
+
+    // 顺序没变就什么都不做：拖动后原地放下也会走到这里（drop 到自己身上），
+    // 那一次不该触发写盘 + 全窗口广播
+    const unchanged = reordered.every((item, i) => current.items[i]?.id === item.id)
+    if (unchanged) return { ok: true, items: current.items.map((i) => ({ ...i })) }
+
+    const next = cloneDB(current)
+    next.items = reordered
+
+    try {
+      await commit(next)
+    } catch (err) {
+      return { ok: false, error: `保存失败：${String(err)}` }
+    }
+
+    return { ok: true, items: reordered.map((i) => ({ ...i })) }
+  })
+}
+
+/**
+ * 导入表格（需口令）—— **会清空现有全部数据**。
+ *
+ * 这是本系统唯一一个「整体替换」的入口，所以几条原则必须写死：
+ *
+ * 1. **清空发生在校验之后。** 先逐行校验（名称 / 单位非空、数量是有限数），
+ *    任何一行不合法就整体拒绝、**一行都不导入**。
+ *    否则会出现「导入到一半失败、旧数据又没了」的双输局面 ——
+ *    用户既没拿到新数据，旧数据也回不来了。
+ * 2. **物品顺序 = 表格行顺序。** 这是用户明确要求的语义
+ *    （「仓库的物品顺序按表格顺序」），所以直接按 rows 的次序 push，
+ *    不做任何排序、也不按名称去重。
+ * 3. **每行建一条入库记录。** 表格只有名称 / 单位 / 数量 / 备注四列，
+ *    没有「操作人 / 经手人 / 时间」，这三样由导入对话框统一填 ——
+ *    所以同一批导入的所有记录共享同一个 time、operator、handler。
+ *    记录类型是 'in'：导入本质上是「把现有库存一次性建账」，
+ *    而 StockRecord.type 只有 in / out 两种，没有第三种可用。
+ * 4. **警戒值一律用默认值。** 表格没有这一列，导入后用户自己在仓库页改。
+ */
+export function importTable(
+  password: unknown,
+  rows: ImportRow[],
+  operator: unknown,
+  handler: unknown
+): Promise<ImportResult> {
+  return enqueue(async () => {
+    if (!matchesQuantityPassword(password)) {
+      return { ok: false, error: '口令不正确', wrongPassword: true }
+    }
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { ok: false, error: '表格里没有任何数据行' }
+    }
+
+    // ── 第 1 步：整表校验 ────────────────────────────────────
+    const prepared: { name: string; unit: string; quantity: number; note: string }[] = []
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] as ImportRow | undefined
+
+      const name = normalizeName(typeof row?.name === 'string' ? row.name : String(row?.name ?? ''))
+      if (!name) return { ok: false, error: `第 ${i + 1} 行：名称为空`, rowIndex: i }
+
+      const unit = typeof row?.unit === 'string' ? row.unit.trim() : String(row?.unit ?? '').trim()
+      if (!unit) return { ok: false, error: `第 ${i + 1} 行：单位为空`, rowIndex: i }
+
+      // 空串要单独挡：Number('') === 0，不特判就会把「这一格没填」当成 0 静默导入。
+      // 声明成 unknown 是故意的 —— ImportRow.quantity 类型上是 number，
+      // 但表格解析出来的可能是字符串 / null，这里要按「任意输入」来挡
+      const rawQty: unknown = row?.quantity
+      if (rawQty === null || rawQty === undefined) {
+        return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
+      }
+      if (typeof rawQty === 'string' && rawQty.trim() === '') {
+        return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
+      }
+      const quantity = Number(rawQty)
+      if (!Number.isFinite(quantity)) {
+        return { ok: false, error: `第 ${i + 1} 行：数量不是数字`, rowIndex: i }
+      }
+
+      const note = typeof row?.note === 'string' ? row.note : String(row?.note ?? '')
+      prepared.push({ name, unit, quantity: roundQuantity(quantity), note })
+    }
+
+    // ── 第 2 步：整表替换（清空 + 按行顺序重建） ────────────────
+    const now = new Date().toISOString()
+    const time = toLocalDateTime()
+    const operatorText = typeof operator === 'string' ? operator.trim() : String(operator ?? '')
+    const handlerText = typeof handler === 'string' ? handler.trim() : String(handler ?? '')
+
+    const nextItems: Item[] = []
+    const nextRecords: StockRecord[] = []
+
+    for (const row of prepared) {
+      const item: Item = {
+        id: randomUUID(),
+        name: row.name,
+        unit: row.unit,
+        quantity: row.quantity,
+        threshold: DEFAULT_THRESHOLD,
+        note: row.note,
+        createdAt: now,
+        updatedAt: now
+      }
+      nextItems.push(item)
+
+      nextRecords.push({
+        id: randomUUID(),
+        itemId: item.id,
+        time,
+        name: item.name,
+        unit: item.unit,
+        quantity: row.quantity,
+        type: 'in',
+        operator: operatorText,
+        handler: handlerText,
+        createdAt: now
+      })
+    }
+
+    try {
+      await commit({ version: 1, items: nextItems, records: nextRecords })
+    } catch (err) {
+      return { ok: false, error: `保存失败：${String(err)}` }
+    }
+
+    return { ok: true, itemCount: nextItems.length, recordCount: nextRecords.length }
   })
 }
 

@@ -184,7 +184,7 @@ const warehouseRow = (page, name) =>
       return out
     }
     const tr = [...document.querySelectorAll('tbody tr')].find(
-      (r) => r.querySelector('td')?.textContent?.trim() === n
+      (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
     )
     return tr ? read(tr) : null
   }, name)
@@ -197,7 +197,7 @@ const rowText = (row) =>
 const quantityIsLow = (page, name) =>
   page.evaluate((n) => {
     const tr = [...document.querySelectorAll('tbody tr')].find(
-      (r) => r.querySelector('td')?.textContent?.trim() === n
+      (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
     )
     if (!tr) return null
     // 按表头名定位「数量」列，不按下标 —— 加列时下标会静默错位
@@ -217,7 +217,7 @@ const quantityIsLow = (page, name) =>
 const thresholdOf = (page, name) =>
   page.evaluate((n) => {
     const tr = [...document.querySelectorAll('tbody tr')].find(
-      (r) => r.querySelector('td')?.textContent?.trim() === n
+      (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
     )
     const input = tr && tr.querySelector('.threshold-input')
     return input ? input.value : null
@@ -228,7 +228,7 @@ async function setThresholdViaUi(page, name, value) {
   await page.evaluate(
     ([n, v]) => {
       const tr = [...document.querySelectorAll('tbody tr')].find(
-        (r) => r.querySelector('td')?.textContent?.trim() === n
+        (r) => r.querySelector('td.name-col')?.textContent?.trim() === n
       )
       if (!tr) throw new Error('找不到物品行：' + n)
       const input = tr.querySelector('.threshold-input')

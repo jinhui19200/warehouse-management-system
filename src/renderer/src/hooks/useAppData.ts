@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import type {
   DB,
+  DeleteItemResult,
   DeleteRecordResult,
+  ImportResult,
+  ImportRow,
   RenameItemResult,
+  ReorderItemsResult,
+  SetNoteResult,
   SetQuantityResult,
   SetThresholdResult,
+  SetUnitResult,
   TransactionInput,
   TransactionResult
 } from '@shared/types'
@@ -25,6 +31,21 @@ export interface AppData {
   setItemThreshold: (id: string, threshold: number) => Promise<SetThresholdResult>
   /** 强行修改库存数量（需口令，校验在数据层） */
   setItemQuantity: (id: string, quantity: number, password: string) => Promise<SetQuantityResult>
+  /** 修改物品备注（允许空串 = 清空） */
+  setItemNote: (id: string, note: string) => Promise<SetNoteResult>
+  /** 修改物品单位（空串会被数据层拒绝） */
+  setItemUnit: (id: string, unit: string) => Promise<SetUnitResult>
+  /** 删除整个物品及其名下所有记录（需口令，校验在数据层） */
+  deleteItem: (id: string, password: string) => Promise<DeleteItemResult>
+  /** 拖动改顺序。不需要口令，但重排的是 items 数组本身 */
+  reorderItems: (orderedIds: string[]) => Promise<ReorderItemsResult>
+  /** 导入表格（需口令，会清空现有全部数据） */
+  importTable: (
+    password: string,
+    rows: ImportRow[],
+    operator: string,
+    handler: string
+  ) => Promise<ImportResult>
   renameItem: (id: string, name: string, unit?: string) => Promise<RenameItemResult>
   exportXlsx: (data: number[], defaultName: string) => Promise<{
     ok: boolean
@@ -83,6 +104,56 @@ export function useAppData(): AppData {
   const setItemQuantity = useCallback(
     async (id: string, quantity: number, password: string): Promise<SetQuantityResult> => {
       const result = await window.api.setItemQuantity(id, quantity, password)
+      if (result.ok) await refresh()
+      return result
+    },
+    [refresh]
+  )
+
+  const setItemNote = useCallback(
+    async (id: string, note: string): Promise<SetNoteResult> => {
+      const result = await window.api.setItemNote(id, note)
+      if (result.ok) await refresh()
+      return result
+    },
+    [refresh]
+  )
+
+  const setItemUnit = useCallback(
+    async (id: string, unit: string): Promise<SetUnitResult> => {
+      const result = await window.api.setItemUnit(id, unit)
+      if (result.ok) await refresh()
+      return result
+    },
+    [refresh]
+  )
+
+  const deleteItem = useCallback(
+    async (id: string, password: string): Promise<DeleteItemResult> => {
+      const result = await window.api.deleteItem(id, password)
+      if (result.ok) await refresh()
+      return result
+    },
+    [refresh]
+  )
+
+  const reorderItems = useCallback(
+    async (orderedIds: string[]): Promise<ReorderItemsResult> => {
+      const result = await window.api.reorderItems(orderedIds)
+      if (result.ok) await refresh()
+      return result
+    },
+    [refresh]
+  )
+
+  const importTable = useCallback(
+    async (
+      password: string,
+      rows: ImportRow[],
+      operator: string,
+      handler: string
+    ): Promise<ImportResult> => {
+      const result = await window.api.importTable(password, rows, operator, handler)
       if (result.ok) await refresh()
       return result
     },
@@ -166,6 +237,11 @@ export function useAppData(): AppData {
     deleteRecord,
     setItemThreshold,
     setItemQuantity,
+    setItemNote,
+    setItemUnit,
+    deleteItem,
+    reorderItems,
+    importTable,
     renameItem,
     exportXlsx,
     openDataFolder

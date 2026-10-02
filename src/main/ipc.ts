@@ -2,7 +2,18 @@ import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { writeFile } from 'node:fs/promises'
 import type { TransactionInput } from '@shared/types'
 import { getDataDir, getDataFilePath, getLoadReport, getSnapshot } from './store/db'
-import { applyTransaction, deleteRecord, renameItem, setItemQuantity, setItemThreshold } from './store/transactions'
+import {
+  applyTransaction,
+  deleteItem,
+  deleteRecord,
+  importTable,
+  renameItem,
+  reorderItems,
+  setItemNote,
+  setItemQuantity,
+  setItemThreshold,
+  setItemUnit
+} from './store/transactions'
 
 /**
  * 数据变更后广播给所有窗口。
@@ -65,6 +76,67 @@ export function registerIpcHandlers(): void {
     'db:setQuantity',
     async (_event, id: string, quantity: number, password: string) => {
       const result = await setItemQuantity(id, quantity, password)
+      if (result.ok) broadcastChanged()
+      return result
+    }
+  )
+
+  /**
+   * 修改物品备注。
+   *
+   * 与 setThreshold / setQuantity 一样不写流水，
+   * 所以成功后必须广播 —— 三页都靠这个事件重新拉取快照。
+   */
+  ipcMain.handle('db:setNote', async (_event, id: string, note: string) => {
+    const result = await setItemNote(id, note)
+    if (result.ok) broadcastChanged()
+    return result
+  })
+
+  /** 修改物品单位（同样不写流水，成功才广播） */
+  ipcMain.handle('db:setUnit', async (_event, id: string, unit: string) => {
+    const result = await setItemUnit(id, unit)
+    if (result.ok) broadcastChanged()
+    return result
+  })
+
+  /**
+   * 删除整个物品（需口令）。
+   *
+   * 口令的校验点在数据层，不在这个 handler 里 —— 界面上的口令框只是交互，
+   * 绕过它直接 invoke 本通道必须同样被拒。
+   */
+  ipcMain.handle('db:deleteItem', async (_event, id: string, password: string) => {
+    const result = await deleteItem(id, password)
+    if (result.ok) broadcastChanged()
+    return result
+  })
+
+  /**
+   * 拖动改顺序。**不校验口令**（理由见 reorderItems 的注释），
+   * 但它会重排 items 数组 —— 顺序变了，三页都得跟着变，所以也要广播。
+   */
+  ipcMain.handle('db:reorderItems', async (_event, orderedIds: string[]) => {
+    const result = await reorderItems(orderedIds)
+    if (result.ok) broadcastChanged()
+    return result
+  })
+
+  /**
+   * 导入表格（需口令，**会清空现有全部数据**）。
+   *
+   * 成功后必须广播：这是一次整体替换，三页手里的数据全部作废。
+   */
+  ipcMain.handle(
+    'db:importTable',
+    async (
+      _event,
+      password: string,
+      rows: Parameters<typeof importTable>[1],
+      operator: string,
+      handler: string
+    ) => {
+      const result = await importTable(password, rows, operator, handler)
       if (result.ok) broadcastChanged()
       return result
     }

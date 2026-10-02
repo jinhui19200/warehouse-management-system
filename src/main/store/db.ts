@@ -78,11 +78,16 @@ function parseDB(raw: string): DB {
   // 旧数据文件里没有 threshold 字段（这个功能是后加的）。
   // 在这里补齐，而不是让每个读取方自己判断 undefined ——
   // 补齐点只有一处，界面和数据层就不可能对同一个物品算出不同的警戒状态。
+  // note 是 v1.6.0 才加的，旧文件没有，同样在这里补成空串。
   const items = Array.isArray(parsed.items)
-    ? parsed.items.map((i) => ({
-        ...i,
-        threshold: normalizeThreshold((i as { threshold?: unknown }).threshold)
-      }))
+    ? parsed.items.map((i) => {
+        const rawNote = (i as { note?: unknown }).note
+        return {
+          ...i,
+          threshold: normalizeThreshold((i as { threshold?: unknown }).threshold),
+          note: typeof rawNote === 'string' ? rawNote : ''
+        }
+      })
     : []
   return {
     version: 1,
