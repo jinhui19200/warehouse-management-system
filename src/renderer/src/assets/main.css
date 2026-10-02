@@ -1429,6 +1429,21 @@ body {
   border-radius: 8px;
 }
 
+/*
+ * 「第 N 行数量不是数字，会按 0 记录」——用**黄**不用红：
+ * 这不是错误（导入照样进行），是提醒用户事后去核对那几行。
+ * 用红色会让人以为「不能导入」，与 .modal-warn 那类真阻断的提示混为一谈。
+ */
+.import-warn {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: #fff8e6;
+  color: #8a5a00;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
 /* 预览表比主表紧凑一号：它是「看一眼有没有读错」用的，不需要那么宽松 */
 .table-compact {
   font-size: 12.5px;

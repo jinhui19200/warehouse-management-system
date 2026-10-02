@@ -667,8 +667,16 @@ export function WarehousePage({
             const result = await importTable(importPassword, rows, operator, handler)
             if (result.ok) {
               setImportPassword(null)
+              // 有数量被按 0 记的行时，把行号一并报出来 —— 这几行的库存是「猜的」，
+              // 用户需要事后核对（导入对话框里也提前提示过一次，这是第二次）
+              const zeroNote =
+                result.zeroedRows.length > 0
+                  ? `\n\n其中 ${result.zeroedRows.length} 行的数量不是数字，已按 0 记录：` +
+                    `第 ${result.zeroedRows.slice(0, 10).join('、')} 行` +
+                    `${result.zeroedRows.length > 10 ? ' 等' : ''}。请核对这几行。`
+                  : ''
               // eslint-disable-next-line no-alert
-              alert(`已导入 ${result.itemCount} 个物品、${result.recordCount} 条记录`)
+              alert(`已导入 ${result.itemCount} 个物品、${result.recordCount} 条记录${zeroNote}`)
             }
             return result
           }}

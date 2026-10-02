@@ -63,6 +63,13 @@ interface Parsed {
   hasHeader: boolean
   /** 表格里被跳过的空行数（全空的行） */
   skipped: number
+  /**
+   * 数量不是数字（或这一格是空的）的**数据行号**，1 起算。
+   *
+   * 这些行**不会**被拒 —— 按用户要求，数量照 0 录入，但必须提前告诉用户
+   * 是哪几行，否则他事后根本不知道哪些库存是「猜的 0」。
+   */
+  invalidQtyRows: number[]
 }
 
 /**
@@ -84,11 +91,11 @@ function decodeCsv(buf: ArrayBuffer): string {
 
 function parseSheet(workbook: XLSX.WorkBook): Parsed {
   const sheet = workbook.Sheets[workbook.SheetNames[0]]
-  if (!sheet) return { rows: [], hasHeader: false, skipped: 0 }
+  if (!sheet) return { rows: [], hasHeader: false, skipped: 0, invalidQtyRows: [] }
 
   // header: 1 让第一行也作为普通行返回，方便我们判断它是不是表头
   const raw = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '', blankrows: false })
-  if (raw.length === 0) return { rows: [], hasHeader: false, skipped: 0 }
+  if (raw.length === 0) return { rows: [], hasHeader: false, skipped: 0, invalidQtyRows: [] }
 
   const firstRow = (raw[0] ?? []).map((c) => String(c ?? ''))
   const mapping = mapHeader(firstRow)
@@ -96,6 +103,7 @@ function parseSheet(workbook: XLSX.WorkBook): Parsed {
   const cols = mapping ?? { name: 0, unit: 1, quantity: 2, note: 3 }
 
   const rows: ImportRow[] = []
+  const invalidQtyRows: number[] = []
   let skipped = 0
   for (let i = hasHeader ? 1 : 0; i < raw.length; i++) {
     const cells = (raw[i] ?? []).map((c) => String(c ?? '').trim())
@@ -108,15 +116,22 @@ function parseSheet(workbook: XLSX.WorkBook): Parsed {
       skipped++
       continue
     }
+
+    const quantity = quantityRaw === '' ? Number.NaN : Number(quantityRaw)
+    // 记下「数量不是数字」的行号（1 起算，与数据层回报的口径一致）。
+    // 空串在这里也走 Number.NaN，所以「那格空着」同样会被列进来 ——
+    // 实际表格里这种情况最多（比如「洗发水」那行数量没填）。
+    if (!Number.isFinite(quantity)) invalidQtyRows.push(rows.length + 1)
+
     rows.push({
       name,
       unit,
-      quantity: quantityRaw === '' ? Number.NaN : Number(quantityRaw),
+      quantity,
       note: cols.note >= 0 ? (cells[cols.note] ?? '') : ''
     })
   }
 
-  return { rows, hasHeader, skipped }
+  return { rows, hasHeader, skipped, invalidQtyRows }
 }
 
 export function ImportDialog({
@@ -256,6 +271,22 @@ export function ImportDialog({
                   <p className="modal-note">仅预览前 {preview.length} 行，共 {parsed.rows.length} 行。</p>
                 )}
               </div>
+
+              {/*
+                数量不是数字**不阻断导入**（按 0 记），但必须在按下确认之前
+                就把「是哪几行」摆出来 —— 否则用户事后根本不知道
+                哪些库存是猜出来的 0。
+              */}
+              {parsed.invalidQtyRows.length > 0 && (
+                <p className="import-warn">
+                  第 {parsed.invalidQtyRows.slice(0, 10).join('、')}
+                  {parsed.invalidQtyRows.length > 10
+                    ? ` 等 ${parsed.invalidQtyRows.length} 行`
+                    : ' 行'}
+                  的数量不是数字（或没填），导入时会<strong>按 0 记录</strong>，
+                  其余内容照常导入。
+                </p>
+              )}
 
               <div className="import-people">
                 <label className="import-field">

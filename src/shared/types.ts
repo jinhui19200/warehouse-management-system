@@ -146,8 +146,14 @@ export type RenameItemResult =
   | { ok: false; error: string }
 
 /**
- * 表格导入的一行。来源是用户在导入对话框里选择的 xlsx/csv 文件，
- * 数据层会校验每一行（名称、单位、数量必填，数量必须为有限数）。
+ * 表格导入的一行。来源是用户在导入对话框里选择的 xlsx/csv 文件。
+ *
+ * 校验分两档（用户 2026-10-02 明确要求）：
+ *  - **名称 / 单位**为空 → 整表拒绝。没有名字建不出物品，
+ *    单位空则会让仓库页整列空白 —— 这两样没法替用户猜。
+ *  - **数量不是数字** → 不阻断，按 `0` 录入，并在结果里回报是哪几行。
+ *    实际表格里「这一格空着」太常见了（比如洗发水那行），
+ *    为此把整张表拒掉、让用户回 Excel 一行行改，代价太大。
  */
 export interface ImportRow {
   name: string
@@ -158,7 +164,13 @@ export interface ImportRow {
 
 /** 导入表格的结果 */
 export type ImportResult =
-  | { ok: true; itemCount: number; recordCount: number }
+  | {
+      ok: true
+      itemCount: number
+      recordCount: number
+      /** 数量不是数字、被按 0 录入的行号（1 起算，含表头时的数据行序号） */
+      zeroedRows: number[]
+    }
   | { ok: false; error: string; wrongPassword?: boolean; rowIndex?: number }
 
 /** 修改物品备注 */

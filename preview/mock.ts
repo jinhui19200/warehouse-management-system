@@ -410,7 +410,8 @@ function reorderItems(orderedIds: string[]): ReorderItemsResult {
 
 /**
  * 导入表格（需口令，**会清空现有全部数据**）。
- * 语义与主进程 `importTable` 一致：先整表校验，再整表替换。
+ * 语义与主进程 `importTable` 一致：名称/单位严格、**数量不是数字按 0 录入**，
+ * 且整表校验在清空之前。
  */
 function importTable(
   password: unknown,
@@ -426,6 +427,7 @@ function importTable(
   }
 
   const prepared: { name: string; unit: string; quantity: number; note: string }[] = []
+  const zeroedRows: number[] = []
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] as ImportRow | undefined
 
@@ -435,21 +437,22 @@ function importTable(
     const unit = typeof row?.unit === 'string' ? row.unit.trim() : String(row?.unit ?? '').trim()
     if (!unit) return { ok: false, error: `第 ${i + 1} 行：单位为空`, rowIndex: i }
 
-    // 同主进程：声明成 unknown，按「任意输入」来挡（表格解析出来的可能是字符串）
+    // 同主进程：数量解析不出来就按 0 记，并记下行号（空串也算「不是数字」）
     const rawQty: unknown = row?.quantity
-    if (rawQty === null || rawQty === undefined) {
-      return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
-    }
-    if (typeof rawQty === 'string' && rawQty.trim() === '') {
-      return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
-    }
-    const quantity = Number(rawQty)
-    if (!Number.isFinite(quantity)) {
-      return { ok: false, error: `第 ${i + 1} 行：数量不是数字`, rowIndex: i }
+    const isBlank =
+      rawQty === null || rawQty === undefined || (typeof rawQty === 'string' && rawQty.trim() === '')
+    const parsed = isBlank ? Number.NaN : Number(rawQty)
+
+    let quantity: number
+    if (Number.isFinite(parsed)) {
+      quantity = roundQuantity(parsed)
+    } else {
+      quantity = 0
+      zeroedRows.push(i + 1)
     }
 
     const note = typeof row?.note === 'string' ? row.note : String(row?.note ?? '')
-    prepared.push({ name, unit, quantity: roundQuantity(quantity), note })
+    prepared.push({ name, unit, quantity, note })
   }
 
   const now = new Date().toISOString()
@@ -487,7 +490,12 @@ function importTable(
 
   db = { version: 1, items: nextItems, records: nextRecords }
   notify()
-  return { ok: true, itemCount: nextItems.length, recordCount: nextRecords.length }
+  return {
+    ok: true,
+    itemCount: nextItems.length,
+    recordCount: nextRecords.length,
+    zeroedRows
+  }
 }
 
 /**

@@ -2925,6 +2925,73 @@ async function run(page, shot) {
     (await page.locator('.low-only-toggle input[type="checkbox"]').count()) === 0
   )
 
+  // ── 9h. 数量不是数字：提示 + 照常录入（按 0） ───────────────
+  /*
+   * 用户 2026-10-02 的要求：数量那格空着（或写了非数字）时**不要整表拒绝**，
+   * 给个提示、按 0 录入就行。实际表格里「数量没填」太常见了。
+   *
+   * 这条断言盯两件事：
+   *  1. **按下确认之前**就要看到提示、并且点明是哪几行 ——
+   *     事后才说等于没说，用户根本不知道该去核对哪一行；
+   *  2. 导入真的成功、那一行落成 0，且**别的行不受影响**。
+   */
+  section('9h. 导入：数量不是数字 → 提示 + 按 0 录入')
+
+  const csvPath2 = join(tmpdir(), `wh-import-zero-${Date.now()}.csv`)
+  await writeFile(
+    csvPath2,
+    [
+      '名称,单位,数量,备注',
+      '正常甲,个,12,',
+      '数量空,箱,,这一行数量没填',
+      '正常乙,米,34,'
+    ].join('\n'),
+    'utf8'
+  )
+
+  dialogs.length = 0
+  await page.locator('.card-toolbar button', { hasText: '导入表格' }).click()
+  await page.waitForSelector('.modal-overlay')
+  await page.locator('.modal input[type="password"]').fill('771204')
+  await page.locator('.modal .btn-danger').click()
+  await page.waitForTimeout(400)
+  await page.locator('.modal input[type="file"]').setInputFiles(csvPath2)
+  await page.waitForTimeout(700)
+
+  check(
+    '预览里给出「数量不是数字」的提示',
+    (await page.locator('.import-warn').count()) === 1,
+    `import-warn=${await page.locator('.import-warn').count()}`
+  )
+  const warnText = (await page.locator('.import-warn').textContent()) ?? ''
+  check('提示点明了是第 2 行', /第 2 行/.test(warnText), warnText.slice(0, 90))
+  check('提示说明会按 0 记录', /按 0 记录/.test(warnText), warnText.slice(0, 90))
+  check(
+    '确认按钮没被禁用（这条路径不阻断导入）',
+    !(await page.locator('.modal-actions .btn', { hasText: '确认导入' }).isDisabled())
+  )
+
+  await page.locator('.modal-actions .btn', { hasText: '确认导入' }).click()
+  await page.waitForTimeout(1000)
+  check('导入成功、对话框自己关掉', (await page.locator('.modal-overlay').count()) === 0)
+  check('物品数 = 3 —— 一行都没丢', (await rowCount(page)) === 3, `${await rowCount(page)}`)
+  check(
+    '数量为空那行的库存落成 0',
+    (await cellText('数量空', 'qty-col')) === '0',
+    String(await cellText('数量空', 'qty-col'))
+  )
+  check(
+    '正常行的数量没被动（12 / 34）',
+    (await cellText('正常甲', 'qty-col')) === '12' &&
+      (await cellText('正常乙', 'qty-col')) === '34',
+    `${await cellText('正常甲', 'qty-col')} / ${await cellText('正常乙', 'qty-col')}`
+  )
+  check(
+    '导入完成后的提示里也报了「按 0 记录」的行号',
+    dialogs.some((d) => /按 0 记录/.test(d.message) && /第 2 行/.test(d.message)),
+    JSON.stringify(dialogs.map((d) => d.message.slice(0, 70)))
+  )
+
   // ── 10. 控制台 ───────────────────────────────────────────
   section('10. 渲染进程控制台')
   check('无 console.error / pageerror', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))

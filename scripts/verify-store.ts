@@ -995,11 +995,25 @@ async function main(): Promise<void> {
     '',
     ''
   )
-  check('有非法行 → 整表拒绝', impBadRow.ok === false, JSON.stringify(impBadRow))
+  check('名称为空 → 整表拒绝（没名字建不出物品）', impBadRow.ok === false, JSON.stringify(impBadRow))
   check(
     '整表被拒时旧数据仍在（不会「导入到一半、旧数据又没了」）',
     getSnapshot().items.length === itemsBeforeDelete - 1,
     `${getSnapshot().items.length}`
+  )
+  const impNoUnit = await importTable(
+    QUANTITY_EDIT_PASSWORD,
+    [
+      { name: '好行', unit: '个', quantity: 1 },
+      { name: '缺单位', unit: '   ', quantity: 2 }
+    ],
+    '',
+    ''
+  )
+  check(
+    '单位为空 → 整表拒绝（空单位会让仓库页整列空白）',
+    impNoUnit.ok === false,
+    JSON.stringify(impNoUnit)
   )
   const impEmpty = await importTable(QUANTITY_EDIT_PASSWORD, [], '', '')
   check('空表格 → 拒绝（否则等于一键清空）', impEmpty.ok === false, JSON.stringify(impEmpty))
@@ -1046,6 +1060,68 @@ async function main(): Promise<void> {
   check(
     '重载后导入的数据仍在',
     getSnapshot().items.map((i) => i.name).join('|') === '导入甲|导入乙|导入丙',
+    getSnapshot().items.map((i) => i.name).join('|')
+  )
+
+  // ── 25f. 数量不是数字：不阻断，按 0 记并回报行号 ──────────
+  /*
+   * 用户 2026-10-02 明确要求：表格里数量那格空着（或写了非数字）时，
+   * **不要整表拒绝** —— 实际表格里这种情况太常见，为此让用户回 Excel
+   * 一行行改、再重新导入，代价太大。改成按 0 录入 + 回报是哪几行。
+   *
+   * 名称 / 单位仍然严格：没有名字建不出物品，单位空会让仓库页整列空白，
+   * 这两样没法替用户猜。
+   */
+  const impZero = await importTable(
+    QUANTITY_EDIT_PASSWORD,
+    [
+      { name: '零甲', unit: '个', quantity: 5 },
+      { name: '零乙', unit: '个', quantity: Number.NaN },
+      { name: '零丙', unit: '个', quantity: '' as unknown as number },
+      { name: '零丁', unit: '个', quantity: 7 }
+    ],
+    '张三',
+    '李四'
+  )
+  check('数量不是数字 → 不再整表拒绝', impZero.ok === true, JSON.stringify(impZero).slice(0, 150))
+  if (impZero.ok) {
+    check(
+      '回报了被按 0 记的行号（第 2、3 行）',
+      impZero.zeroedRows.join(',') === '2,3',
+      JSON.stringify(impZero.zeroedRows)
+    )
+    check('物品数仍是 4 —— 一行都没丢', impZero.itemCount === 4, `${impZero.itemCount}`)
+    check('记录数也是 4', impZero.recordCount === 4, `${impZero.recordCount}`)
+  }
+  const z = getSnapshot()
+  check('非数字（NaN）那行落成 0', z.items[1].quantity === 0, `${z.items[1].quantity}`)
+  check('空串那行也落成 0', z.items[2].quantity === 0, `${z.items[2].quantity}`)
+  check(
+    '合法行的数量没被动（5 / 7）',
+    z.items[0].quantity === 5 && z.items[3].quantity === 7,
+    `${z.items[0].quantity} / ${z.items[3].quantity}`
+  )
+  check(
+    '按 0 记的那些行，记录里的数量同样是 0（物品与记录不会对不上）',
+    z.records.every((r) => z.items.find((i) => i.id === r.itemId)?.quantity === r.quantity)
+  )
+  check(
+    '同一批里单位空 → 照样整表拒绝（宽松的只有数量）',
+    (
+      await importTable(
+        QUANTITY_EDIT_PASSWORD,
+        [
+          { name: '甲', unit: '个', quantity: 1 },
+          { name: '乙', unit: '', quantity: 2 }
+        ],
+        '',
+        ''
+      )
+    ).ok === false
+  )
+  check(
+    '被拒之后上一步的数据还在（没有半途清空）',
+    getSnapshot().items.map((i) => i.name).join('|') === '零甲|零乙|零丙|零丁',
     getSnapshot().items.map((i) => i.name).join('|')
   )
 

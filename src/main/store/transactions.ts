@@ -441,10 +441,13 @@ export function reorderItems(orderedIds: string[]): Promise<ReorderItemsResult> 
  *
  * 这是本系统唯一一个「整体替换」的入口，所以几条原则必须写死：
  *
- * 1. **清空发生在校验之后。** 先逐行校验（名称 / 单位非空、数量是有限数），
- *    任何一行不合法就整体拒绝、**一行都不导入**。
- *    否则会出现「导入到一半失败、旧数据又没了」的双输局面 ——
- *    用户既没拿到新数据，旧数据也回不来了。
+ * 1. **校验分两档，清空永远发生在校验之后。**
+ *    名称 / 单位为空 → 整体拒绝、一行都不导入（没有名字建不出物品，
+ *    单位空会让仓库页整列空白，这两样没法替用户猜）；
+ *    **数量不是数字 → 不阻断**，按 `0` 录入并在结果里回报行号
+ *    （用户 2026-10-02 明确要求）。实际表格里「数量那格空着」太常见，
+ *    为此把整张表拒掉、让用户回 Excel 一行行改，代价太大。
+ *    无论哪一档，都**不能出现「导入到一半失败、旧数据又没了」**的局面。
  * 2. **物品顺序 = 表格行顺序。** 这是用户明确要求的语义
  *    （「仓库的物品顺序按表格顺序」），所以直接按 rows 的次序 push，
  *    不做任何排序、也不按名称去重。
@@ -470,8 +473,11 @@ export function importTable(
       return { ok: false, error: '表格里没有任何数据行' }
     }
 
-    // ── 第 1 步：整表校验 ────────────────────────────────────
+    // ── 第 1 步：整表校验（名称 / 单位严格，数量宽松） ──────────
     const prepared: { name: string; unit: string; quantity: number; note: string }[] = []
+    /** 数量不是数字、被按 0 录入的行号（1 起算） */
+    const zeroedRows: number[] = []
+
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i] as ImportRow | undefined
 
@@ -481,23 +487,28 @@ export function importTable(
       const unit = typeof row?.unit === 'string' ? row.unit.trim() : String(row?.unit ?? '').trim()
       if (!unit) return { ok: false, error: `第 ${i + 1} 行：单位为空`, rowIndex: i }
 
-      // 空串要单独挡：Number('') === 0，不特判就会把「这一格没填」当成 0 静默导入。
+      // 数量：能解析成有限数就用它，否则按 0 记并记下行号。
+      // 空串要单独挡：Number('') === 0，不特判就分不清「本来填了 0」和「这格是空的」，
+      // 而两者都要回报给用户（后者才是「需要去核对的那些行」）。
       // 声明成 unknown 是故意的 —— ImportRow.quantity 类型上是 number，
-      // 但表格解析出来的可能是字符串 / null，这里要按「任意输入」来挡
+      // 但表格解析出来的可能是字符串 / null，这里要按「任意输入」来挡。
       const rawQty: unknown = row?.quantity
-      if (rawQty === null || rawQty === undefined) {
-        return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
-      }
-      if (typeof rawQty === 'string' && rawQty.trim() === '') {
-        return { ok: false, error: `第 ${i + 1} 行：数量为空`, rowIndex: i }
-      }
-      const quantity = Number(rawQty)
-      if (!Number.isFinite(quantity)) {
-        return { ok: false, error: `第 ${i + 1} 行：数量不是数字`, rowIndex: i }
+      const isBlank =
+        rawQty === null ||
+        rawQty === undefined ||
+        (typeof rawQty === 'string' && rawQty.trim() === '')
+      const parsed = isBlank ? Number.NaN : Number(rawQty)
+
+      let quantity: number
+      if (Number.isFinite(parsed)) {
+        quantity = roundQuantity(parsed)
+      } else {
+        quantity = 0
+        zeroedRows.push(i + 1)
       }
 
       const note = typeof row?.note === 'string' ? row.note : String(row?.note ?? '')
-      prepared.push({ name, unit, quantity: roundQuantity(quantity), note })
+      prepared.push({ name, unit, quantity, note })
     }
 
     // ── 第 2 步：整表替换（清空 + 按行顺序重建） ────────────────
@@ -542,7 +553,12 @@ export function importTable(
       return { ok: false, error: `保存失败：${String(err)}` }
     }
 
-    return { ok: true, itemCount: nextItems.length, recordCount: nextRecords.length }
+    return {
+      ok: true,
+      itemCount: nextItems.length,
+      recordCount: nextRecords.length,
+      zeroedRows
+    }
   })
 }
 
