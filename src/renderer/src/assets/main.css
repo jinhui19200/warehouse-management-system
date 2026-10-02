@@ -1380,11 +1380,22 @@ body {
   white-space: nowrap;
 }
 
-/* 表头里塞一个复选框时用来对齐（警戒值 + 小方框） */
-.th-inline {
+/*
+ * 「N 种低于警戒值 ☐ 只看这些」—— 整个 label 可点，不用非得点中小方框。
+ *
+ * align-self 是必要的：h2 是 `align-items: baseline`，而 label 里塞的是
+ * 复选框（没有文字基线），跟着基线对齐会明显偏上。
+ */
+.low-only-toggle {
   display: inline-flex;
   align-items: center;
+  align-self: center;
   gap: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-faint);
+  cursor: pointer;
+  user-select: none;
 }
 
 /* ===== 导入表格对话框 ==================================== */

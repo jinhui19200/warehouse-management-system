@@ -347,8 +347,27 @@ export function WarehousePage({
               ? `匹配 ${matchedIds.size} / 共 ${items.length} 种`
               : `${items.length} 种物品`}
           </span>
-          {belowCount > 0 && (
-            <span className="count count-warn">{belowCount} 种低于警戒值</span>
+          {/*
+            「只看低库存」的勾选框放这里，不放表头的「警戒值」旁边 ——
+            它和「N 种低于警戒值」本来就是同一件事：一个报数量、一个做筛选，
+            挨着才看得出这个框在筛什么。
+
+            注意 `belowCount === 0` 时**也要显示**：用户勾上之后刚好把货补齐，
+            若这时候勾选框跟着消失，表格空着却没法取消勾选 —— 页面就卡死了。
+          */}
+          {(belowCount > 0 || lowOnly) && (
+            <label className="low-only-toggle" title="勾选后只显示低于警戒值的物品">
+              <span className={belowCount > 0 ? 'count count-warn' : 'count'}>
+                {belowCount} 种低于警戒值
+              </span>
+              <input
+                type="checkbox"
+                checked={lowOnly}
+                onChange={(e) => setLowOnly(e.target.checked)}
+                aria-label="只显示低于警戒值的物品"
+              />
+              只看这些
+            </label>
           )}
         </h2>
         <div className="card-toolbar">
@@ -449,17 +468,8 @@ export function WarehousePage({
               </th>
               <th title="双击或右键单位可以修改">单位</th>
               <th title="双击或右键备注可以修改">备注</th>
-              <th className="num">
-                <span className="th-inline">
-                  警戒值
-                  <input
-                    type="checkbox"
-                    checked={lowOnly}
-                    onChange={(e) => setLowOnly(e.target.checked)}
-                    aria-label="只显示低于警戒值的物品"
-                    title="勾选后只显示低于警戒值的物品"
-                  />
-                </span>
+              <th className="num" title="库存低于这个数时标红（默认 100）">
+                警戒值
               </th>
               <th className="num">本月入库（{monthLabel}）</th>
               <th className="num">本月出库（{monthLabel}）</th>

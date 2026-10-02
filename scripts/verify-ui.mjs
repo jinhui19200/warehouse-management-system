@@ -809,9 +809,21 @@ async function run(page, shot) {
     String(await cellText('M3×8 螺丝', 'unit-col'))
   )
 
-  // ── 只看低于警戒值（表头「警戒值」旁的小方框） ──────────
+  // ── 只看低于警戒值（「N 种低于警戒值」旁的小方框） ──────────
+  /*
+   * 勾选框的位置是用户明确要求的：「N 种低于警戒值」旁边，
+   * 不是表头的「警戒值」旁边。这条断言就是钉位置的 ——
+   * 光验「勾上能筛」的话，放回表头也一样绿。
+   */
+  const inHeader = await page.locator('.card-header .low-only-toggle input[type="checkbox"]').count()
+  const inThead = await page.locator('thead input[type="checkbox"]').count()
+  check(
+    '勾选框在标题行的「N 种低于警戒值」旁边，不在表头',
+    inHeader === 1 && inThead === 0,
+    `标题区 ${inHeader} 个 / 表头 ${inThead} 个`
+  )
   check('默认不勾选「只看低库存」，6 种全显示', (await rowCount(page)) === 6, `${await rowCount(page)}`)
-  await page.locator('thead input[type="checkbox"]').check()
+  await page.locator('.low-only-toggle input[type="checkbox"]').check()
   await page.waitForTimeout(300)
   check('勾选后只剩低于警戒值的 3 种', (await rowCount(page)) === 3, `${await rowCount(page)}`)
   const lowOnlyNames = await page.evaluate(() =>
@@ -824,7 +836,7 @@ async function run(page, shot) {
     ['贴片电阻 10kΩ', '铜线 1.5mm²', 'PCB 打样板'].every((n) => lowOnlyNames.includes(n)),
     lowOnlyNames.join('、')
   )
-  await page.locator('thead input[type="checkbox"]').uncheck()
+  await page.locator('.low-only-toggle input[type="checkbox"]').uncheck()
   await page.waitForTimeout(300)
   check('取消勾选后恢复 6 种', (await rowCount(page)) === 6, `${await rowCount(page)}`)
 
@@ -2846,7 +2858,72 @@ async function run(page, shot) {
   )
 
   await switchTab(page, '仓库')
-  await page.waitForTimeout(200)
+  await page.waitForTimeout(300)
+
+  // ── 9g. 边界：勾选中途「没有低库存物品了」 ─────────────────
+  /*
+   * 勾选框跟着「N 种低于警戒值」一起渲染，很自然会写成
+   * `belowCount > 0 && <勾选框>` —— 那样一旦用户勾上之后把货补齐，
+   * 勾选框消失、表格空着、还取消不掉勾选，页面就卡死了。
+   * 所以这里专门把这个边界钉住。
+   */
+  section('9g. 只看低库存：勾选状态下「没有低库存物品了」')
+
+  // 导入的三行数量是 11 / 22 / -3，警戒值都是默认 100 → 三行**都**低于警戒值
+  check(
+    '导入后 3 种都低于警戒值（11 / 22 / -3 都 < 100）',
+    ((await page.locator('.count-warn').textContent()) ?? '').includes('3 种'),
+    await page.locator('.count-warn').textContent()
+  )
+  await page.locator('.low-only-toggle input[type="checkbox"]').check()
+  await page.waitForTimeout(300)
+  check('勾选后 3 行都在（它们本来就都低）', (await rowCount(page)) === 3, `${await rowCount(page)}`)
+
+  /*
+   * 逐个把它们「补货」到高于警戒值 —— 每改一个，那一行就从视图里消失，
+   * 最后「低于警戒值」变成 0 种。这时勾选框必须还在（见本节开头的说明）。
+   */
+  for (const [name, value] of [
+    ['导入甲', '500'],
+    ['导入乙', '600'],
+    ['导入丙', '700']
+  ]) {
+    await page
+      .locator('table.table tbody tr')
+      .nth(await rowIdxByName(name))
+      .locator('.qty-text')
+      .dblclick()
+    await page.waitForSelector('.modal-overlay')
+    await page.locator('.modal input[type="password"]').fill('771204')
+    await page.locator('.modal .btn-primary').click()
+    await page.waitForTimeout(300)
+    await page.locator('.modal input[type="number"]').fill(value)
+    await page.locator('.modal .btn-primary').click()
+    await page.waitForTimeout(700)
+  }
+
+  check(
+    '全部补货之后没有低于警戒值的物品了',
+    (await page.locator('.count-warn').count()) === 0,
+    await page.locator('.count-warn').count()
+  )
+  check('此时表格是空的（勾选还在生效）', (await rowCount(page)) === 0, `${await rowCount(page)}`)
+  check(
+    '★ 此时勾选框仍然在（否则表格空着、勾也取消不掉，页面就卡死了）',
+    (await page.locator('.low-only-toggle input[type="checkbox"]').count()) === 1
+  )
+  /*
+   * 这里用 click 而不是 uncheck：取消勾选之后 belowCount 是 0、lowOnly 是 false，
+   * 勾选框**按设计从 DOM 里消失**（没有低库存物品可筛了）。
+   * 而 uncheck() 会一直等「checked 变成 false」—— 元素都没了，只能等到超时。
+   */
+  await page.locator('.low-only-toggle input[type="checkbox"]').click()
+  await page.waitForTimeout(400)
+  check('取消勾选后 3 行都回来', (await rowCount(page)) === 3, `${await rowCount(page)}`)
+  check(
+    '此时勾选框跟着消失（没有低库存物品可筛，提示和勾选框都没意义）',
+    (await page.locator('.low-only-toggle input[type="checkbox"]').count()) === 0
+  )
 
   // ── 10. 控制台 ───────────────────────────────────────────
   section('10. 渲染进程控制台')
